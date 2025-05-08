@@ -4,6 +4,8 @@ Main Streamlit application file.
 This module contains the main application logic.
 """
 import streamlit as st
+import asyncio
+import extra_streamlit_components as stx
 
 # Import page configuration and apply at the very beginning, before any other Streamlit calls
 from frontend.utils.theme import get_page_config, apply_theme
@@ -24,7 +26,9 @@ from frontend.services.auth_service import (
     login, 
     register, 
     logout, 
-    get_current_user
+    get_current_user,
+    cookie_is_valid,
+    COOKIE_NAME
 )
 from frontend.services.notes_service import (
     create_note, 
@@ -39,19 +43,17 @@ from frontend.utils.validators import validate_note_form, validate_login_form, v
 
 async def main() -> None:
     """Main application function."""
-    # Try to load token from query params for persistence
-    query_params = st.session_state
-    if "auth_token" in query_params and not st.session_state.get("token"):
-        # Restore token from query params
-        token = query_params["auth_token"][0]
-        st.session_state.token = token
-        # Try to restore user info
-        success_user, _ = await get_current_user()
-        if not success_user:
-            # Token invalid, clear it
-            st.session_state.token = None
-            # Remove from query params
-            st.experimental_set_query_params()
+    # Initialize the cookie manager for persistent login
+    if "cookie_manager" not in st.session_state:
+        st.session_state.cookie_manager = stx.CookieManager()
+    
+    # Check if we have a valid auth cookie first (for persistent login)
+    if not st.session_state.get("token") and "cookie_manager" in st.session_state:
+        cookie_valid = cookie_is_valid(st.session_state.cookie_manager)
+        if cookie_valid:
+            st.success("Welcome back! You've been automatically logged in.")
+            # Force a rerun to update UI with authenticated state
+            st.rerun()
     
     # Initialize session state variables if they don't exist
     if "token" not in st.session_state:
@@ -68,10 +70,6 @@ async def main() -> None:
         st.session_state.show_create_note = False
     if "edit_mode" not in st.session_state:
         st.session_state.edit_mode = False
-    
-    # Save token to query params if available (for persistence across reloads)
-    if st.session_state.token:
-        st.experimental_set_query_params(auth_token=st.session_state.token)
     
     # Apply theme (page config is already set at the beginning of the file)
     apply_theme()
@@ -150,7 +148,7 @@ async def main_content() -> None:
                 with st.spinner("Creating note..."):
                     note = await create_note(title, content)
                     
-                    if note and note.get("id"):
+                    if note:
                         st.success("Note created successfully!")
                         st.session_state.current_note = note
                         st.session_state.show_create_note = False
@@ -161,71 +159,80 @@ async def main_content() -> None:
         # Show note detail
         note = st.session_state.get("current_note")
         
-        # Handle edit form submission
-        if st.session_state.get("_edit_note_submitted", False):
-            updated_title = st.session_state.get("edit_note_title", "")
-            updated_content = st.session_state.get("edit_note_content", "")
+        # Make sure note is a dictionary before proceeding
+        if isinstance(note, dict):
+            # Handle edit form submission
+            if st.session_state.get("_edit_note_submitted", False):
+                updated_title = st.session_state.get("edit_note_title", "")
+                updated_content = st.session_state.get("edit_note_content", "")
+                
+                # Validate inputs
+                if validate_note_form(updated_title, updated_content):
+                    with st.spinner("Updating note..."):
+                        updated_note = await update_note(
+                            note.get("id"), 
+                            updated_title, 
+                            updated_content
+                        )
+                        
+                        if updated_note:
+                            st.success("Note updated successfully!")
+                            st.session_state.current_note = updated_note
+                            st.session_state.edit_mode = False
+                        else:
+                            st.error("Failed to update note.")
+                
+                # Reset submission flag
+                st.session_state._edit_note_submitted = False
             
-            # Validate inputs
-            if validate_note_form(updated_title, updated_content):
-                with st.spinner("Updating note..."):
-                    updated_note = await update_note(
-                        note.get("id"), 
-                        updated_title, 
-                        updated_content
-                    )
+            # Handle translate request
+            if st.session_state.get("_translate_note_requested", False):
+                with st.spinner("Translating note..."):
+                    translated_note = await translate_note(note.get("id"))
                     
-                    if updated_note:
-                        st.success("Note updated successfully!")
-                        st.session_state.current_note = updated_note
-                        st.session_state.edit_mode = False
+                    if translated_note:
+                        st.success("Note translated successfully!")
+                        st.session_state.current_note = translated_note
                     else:
-                        st.error("Failed to update note.")
-            
-            # Reset submission flag
-            st.session_state._edit_note_submitted = False
-        
-        # Handle translate request
-        if st.session_state.get("_translate_note_requested", False):
-            with st.spinner("Translating note..."):
-                translated_note = await translate_note(note.get("id"))
+                        st.error("Failed to translate note.")
                 
-                if translated_note:
-                    st.success("Note translated successfully!")
-                    st.session_state.current_note = translated_note
-                else:
-                    st.error("Failed to translate note.")
+                # Reset request flag
+                st.session_state._translate_note_requested = False
             
-            # Reset request flag
-            st.session_state._translate_note_requested = False
-        
-        # Handle delete confirmation
-        if st.session_state.get("_delete_note_confirmed", False):
-            with st.spinner("Deleting note..."):
-                success = await delete_note(note.get("id"))
+            # Handle delete confirmation
+            if st.session_state.get("_delete_note_confirmed", False):
+                with st.spinner("Deleting note..."):
+                    success = await delete_note(note.get("id"))
+                    
+                    if success:
+                        st.success("Note deleted successfully!")
+                        st.session_state.current_note = None
+                        st.rerun()
+                    else:
+                        st.error("Failed to delete note.")
                 
-                if success:
-                    st.success("Note deleted successfully!")
-                    st.session_state.current_note = None
-                    st.rerun()
-                else:
-                    st.error("Failed to delete note.")
+                # Reset confirmation flag
+                st.session_state._delete_note_confirmed = False
             
-            # Reset confirmation flag
-            st.session_state._delete_note_confirmed = False
-        
-        # Render note detail view
-        render_note_detail(note)
+            # Render note detail view
+            render_note_detail(note)
+        else:
+            # Handle invalid note object
+            st.error("Invalid note data. Returning to notes list.")
+            st.session_state.current_note = None
+            st.rerun()
     else:
         # Show notes list
         with st.spinner("Loading notes..."):
-            notes_success = await get_notes()
+            success = await get_notes()
             notes = st.session_state.get("notes", [])
-        
-        # Render notes list
-        render_notes_list(notes)
+            
+            if success and isinstance(notes, list):
+                # Render notes list
+                render_notes_list(notes)
+            else:
+                st.error("Failed to load notes.")
 
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main()) 

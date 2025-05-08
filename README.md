@@ -4,10 +4,27 @@ A lightweight web application for creating, managing, and translating notes with
 
 ## Features
 
-- User Authentication with JWT
+- User Authentication with JWT and Persistent Login via Cookies
 - Note Management (CRUD operations)
 - Russian to English Translation
-- Clean and modern UI
+- Clean and modern UI with dark and orange theme
+
+## Authentication Features
+
+The app now supports persistent authentication using JWT cookies, allowing users to:
+- Stay logged in across browser sessions
+- Securely authenticate without needing to re-enter credentials
+- Access user profile information
+- Safely logout and clear authentication state
+
+## Environment Variables
+
+- `SECRET_KEY`: JWT token secret key
+- `COOKIE_KEY`: Secret key for JWT cookie encryption (defaults to "notes_app_cookie_key" if not set)
+- `COOKIE_EXPIRY_DAYS`: Number of days until authentication cookies expire (defaults to 30 days)
+- `RAPIDAPI_KEY`: API key for RapidAPI translation service
+- `USE_MOCK_TRANSLATION`: Set to "True" to use mock translations (default)
+- `DEBUG`: Enable debug mode
 
 ## Quick Start
 
@@ -64,12 +81,11 @@ python -m pytest backend/app/tests/test_translation.py
 ./test_user_flow.sh
 ```
 
-## Environment Variables
+## Security Notes
 
-- `SECRET_KEY`: JWT token secret key
-- `RAPIDAPI_KEY`: API key for RapidAPI translation service
-- `USE_MOCK_TRANSLATION`: Set to "True" to use mock translations (default)
-- `DEBUG`: Enable debug mode
+- Set a strong, unique `COOKIE_KEY` in your environment variables or secrets.toml file
+- The JWT cookie authentication is designed to enhance user experience while maintaining security
+- All authentication tokens are validated with the backend on each page load
 
 ## API Documentation
 

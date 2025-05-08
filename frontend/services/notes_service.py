@@ -46,17 +46,17 @@ async def get_notes() -> bool:
                 return True
             else:
                 # Handle case where response isn't a list as expected
-                st.error("Unexpected response format from API")
+                # st.error("Unexpected response format from API")
                 if DEBUG_MODE:
                     logging.error(f"Expected list response, got: {type(response)}")
                 return False
         else:
-            st.error("Failed to fetch notes")
+            # st.error("Failed to fetch notes")
             if DEBUG_MODE:
                 logging.error("Error fetching notes: No data returned")
             return False
     except Exception as e:
-        st.error(f"Error fetching notes: {str(e)}")
+        # st.error(f"Error fetching notes: {str(e)}")
         if DEBUG_MODE:
             logging.exception("Error in get_notes")
         return False
@@ -132,13 +132,13 @@ async def create_note(title: str, content: str) -> bool:
         if response:
             # Refresh notes list
             await get_notes()
-            st.success("Note created successfully!")
+            # st.success("Note created successfully!")
             # Debug info
             if DEBUG_MODE:
                 logging.debug(f"Created note: {response}")
             return True
         else:
-            st.error("Failed to create note")
+            # st.error("Failed to create note")
             if DEBUG_MODE:
                 logging.error("Error creating note: No data returned")
             return False

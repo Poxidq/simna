@@ -46,7 +46,7 @@ def validate_login_form(username: str, password: str) -> bool:
         bool: True if inputs are valid
     """
     if not username or not username.strip():
-        st.error("Username is required")
+        st.error("Login > Username is required")
         return False
     
     if not password:
@@ -70,7 +70,7 @@ def validate_register_form(username: str, email: str, password: str) -> bool:
     """
     # Username validation
     if not username or not username.strip():
-        st.error("Username is required")
+        st.error("Register > Username is required")
         return False
     
     if len(username) < 3:

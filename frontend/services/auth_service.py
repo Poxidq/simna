@@ -6,6 +6,8 @@ This module provides functions for user authentication and management.
 import os
 import logging
 import streamlit as st
+import datetime as dt
+import jwt
 from typing import Dict, Tuple, Any, Optional, Union, List, cast, TypeVar, Callable
 from frontend.services.api import api_request
 
@@ -16,6 +18,81 @@ logger = logging.getLogger("auth_service")
 
 # Debug mode setting
 DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
+
+# Cookie settings
+COOKIE_NAME = "notes_app_auth"
+COOKIE_KEY = os.getenv("COOKIE_KEY", "notes_app_cookie_key")
+COOKIE_EXPIRY_DAYS = 30
+
+
+def token_encode(token: str, exp_date: dt.datetime, user_info: Dict[str, Any]) -> str:
+    """
+    Encodes a JSON Web Token (JWT) containing user session data for passwordless
+    reauthentication.
+    
+    Args:
+        token: The original API token
+        exp_date: The expiration date of the JWT
+        user_info: User information to store in the cookie
+        
+    Returns:
+        str: The encoded JWT cookie string for reauthentication
+    """
+    return jwt.encode(
+        {
+            "token": token,
+            "name": user_info.get("username", ""),
+            "user_id": user_info.get("id", ""),
+            "exp_date": exp_date.timestamp(),
+        },
+        COOKIE_KEY,
+        algorithm="HS256",
+    )
+
+
+def cookie_is_valid(cookie_manager) -> bool:
+    """
+    Check if the reauthentication cookie is valid and, if it is, update the session state.
+    
+    Args:
+        cookie_manager: A cookie manager instance
+        
+    Returns:
+        bool: True if the cookie is valid and the session state is updated successfully
+    """
+    try:
+        token_data = cookie_manager.get(COOKIE_NAME)
+        if token_data is None:
+            if DEBUG_MODE:
+                logging.debug("No auth cookie found")
+            return False
+        
+        # Decode the JWT
+        token_info = jwt.decode(token_data, COOKIE_KEY, algorithms=["HS256"])
+        
+        # Check expiration
+        if token_info["exp_date"] < dt.datetime.now(dt.UTC).timestamp():
+            if DEBUG_MODE:
+                logging.debug("Auth cookie expired")
+            return False
+        
+        # Update session state
+        st.session_state.token = token_info["token"]
+        
+        # Attempt to validate the token with a backend call
+        success, _ = get_current_user()
+        if success:
+            if DEBUG_MODE:
+                logging.debug("Successfully authenticated via cookie")
+            return True
+        else:
+            if DEBUG_MODE:
+                logging.debug("Cookie token is invalid on backend")
+            return False
+    except Exception as e:
+        if DEBUG_MODE:
+            logging.debug(f"Cookie validation error: {str(e)}")
+        return False
 
 
 async def login(username: str, password: str) -> Tuple[bool, Optional[str]]:
@@ -54,6 +131,25 @@ async def login(username: str, password: str) -> Tuple[bool, Optional[str]]:
                 # Get current user
                 success, error_msg = await get_current_user()
                 if success:
+                    # If login was successful, store the token in a cookie for persistent login
+                    if "cookie_manager" in st.session_state:
+                        try:
+                            exp_date = dt.datetime.now(dt.UTC) + dt.timedelta(days=COOKIE_EXPIRY_DAYS)
+                            user_info = st.session_state.get("user", {})
+                            cookie_token = token_encode(token, exp_date, user_info)
+                            
+                            st.session_state.cookie_manager.set(
+                                COOKIE_NAME,
+                                cookie_token,
+                                expires_at=exp_date
+                            )
+                            
+                            if DEBUG_MODE:
+                                logging.debug(f"Set auth cookie, expires: {exp_date}")
+                        except Exception as cookie_e:
+                            if DEBUG_MODE:
+                                logging.error(f"Failed to set auth cookie: {str(cookie_e)}")
+                    
                     st.success("Login successful!")
                     return True, None
                 else:
@@ -152,6 +248,17 @@ async def get_current_user() -> Tuple[bool, Optional[str]]:
         else:
             if DEBUG_MODE:
                 logging.debug(f"Failed to get user details. Response: {response}")
+            
+            # Clear cookie if it exists since token is invalid
+            if "cookie_manager" in st.session_state:
+                try:
+                    st.session_state.cookie_manager.delete(COOKIE_NAME)
+                    if DEBUG_MODE:
+                        logging.debug("Deleted invalid auth cookie")
+                except Exception as cookie_e:
+                    if DEBUG_MODE:
+                        logging.error(f"Failed to delete auth cookie: {str(cookie_e)}")
+                        
             return False, "Could not retrieve user details"
             
     except Exception as e:
@@ -165,6 +272,17 @@ async def get_current_user() -> Tuple[bool, Optional[str]]:
                 del st.session_state.token
             if "user" in st.session_state:
                 del st.session_state.user
+                
+            # Clear cookie if it exists
+            if "cookie_manager" in st.session_state:
+                try:
+                    st.session_state.cookie_manager.delete(COOKIE_NAME)
+                    if DEBUG_MODE:
+                        logging.debug("Deleted expired auth cookie")
+                except Exception as cookie_e:
+                    if DEBUG_MODE:
+                        logging.error(f"Failed to delete auth cookie: {str(cookie_e)}")
+                        
             return False, "Your session has expired. Please log in again."
         
         if DEBUG_MODE:
@@ -183,6 +301,16 @@ def logout() -> None:
         del st.session_state.token
     if "user" in st.session_state:
         del st.session_state.user
+    
+    # Delete the authentication cookie if it exists
+    if "cookie_manager" in st.session_state:
+        try:
+            st.session_state.cookie_manager.delete(COOKIE_NAME)
+            if DEBUG_MODE:
+                logger.debug("Deleted auth cookie during logout")
+        except Exception as e:
+            if DEBUG_MODE:
+                logger.error(f"Failed to delete auth cookie: {str(e)}")
     
     # Debug info
     if DEBUG_MODE:
