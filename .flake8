@@ -1,0 +1,13 @@
+[flake8]
+max-line-length = 88
+exclude = .git,__pycache__,docs/,build/,dist/,*.egg-info/
+ignore = E203, W503
+max-complexity = 10
+per-file-ignores =
+    backend/app/db/models.py:E501
+    backend/app/tests/*:E501
+    frontend/app.py:E501
+docstring-convention = google
+inline-quotes = double
+statistics = True
+count = True 

@@ -1,0 +1,196 @@
+name: Notes App CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        export PATH="/root/.local/bin:$PATH"
+        poetry --version
+    
+    - name: Install dependencies
+      run: |
+        poetry install
+    
+    - name: Run tests with pytest
+      env:
+        RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        SECRET_KEY: ${{ secrets.SECRET_KEY }}
+        USE_MOCK_TRANSLATION: ${{ secrets.USE_MOCK_TRANSLATION || 'True' }}
+        TESTING: 'True'
+      run: |
+        poetry run pytest backend/app/tests/ -v --cov=backend --cov-report=xml
+    
+    - name: Check code quality with flake8
+      run: |
+        poetry run flake8 backend frontend
+    
+    - name: Check security with bandit
+      run: |
+        poetry run bandit -r backend
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: false
+
+  api-docs-and-security:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        export PATH="/root/.local/bin:$PATH"
+        poetry --version
+    
+    - name: Install dependencies
+      run: |
+        poetry install
+        poetry run pip install pyyaml openapi-spec-validator
+    
+    - name: Generate OpenAPI Schema
+      run: |
+        mkdir -p docs
+        poetry run python generate_openapi.py
+        # Verify the schema was generated
+        ls -la docs/
+        # Validate OpenAPI Schema
+        poetry run openapi-spec-validator docs/openapi.json
+    
+    - name: Upload OpenAPI Schema as artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: openapi-schema
+        path: |
+          docs/openapi.json
+          docs/openapi.yaml
+    
+    # - name: Set up Go for Nuclei
+    #   uses: actions/setup-go@v4
+    #   with:
+    #     go-version: '1.19'
+    
+    # - name: Install Nuclei and OpenAPI tools
+    #   run: |
+    #     # Install Nuclei
+    #     go install github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest
+    #     echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+        
+    #     # Install openapi2postman for better API scanning
+    #     npm install -g openapi-to-postmanv2
+        
+    #     # Install swagger-cli for schema validation
+    #     npm install -g @apidevtools/swagger-cli
+    
+    # - name: Validate OpenAPI and Generate Postman Collection
+    #   run: |
+    #     # Validate OpenAPI Schema with Swagger CLI
+    #     swagger-cli validate docs/openapi.json
+        
+    #     # Convert OpenAPI to Postman Collection for better API testing
+    #     openapi2postmanv2 -s docs/openapi.json -o postman_collection.json -p
+        
+    #     # Check if conversion was successful
+    #     if [ -f postman_collection.json ]; then
+    #       echo "Successfully created Postman collection from OpenAPI schema"
+    #       cat postman_collection.json | jq '.info.name'
+    #     else
+    #       echo "Failed to create Postman collection"
+    #       exit 1
+    #     fi
+    
+    # - name: Start API Server for DAST Testing
+    #   env:
+    #     RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+    #     SECRET_KEY: ${{ secrets.SECRET_KEY }}
+    #     USE_MOCK_TRANSLATION: ${{ secrets.USE_MOCK_TRANSLATION || 'True' }}
+    #   run: |
+    #     poetry run uvicorn backend.main:app --host 0.0.0.0 --port 8000 &
+    #     # Wait for server to start
+    #     sleep 10
+    #     # Test if API is actually up and running with OpenAPI docs available
+    #     curl -s http://localhost:8000/api/v1/openapi.json | jq '.info.title' || echo "API not ready"
+    
+    # - name: Run DAST Security Testing with Nuclei
+    #   run: |
+    #     # Create security reports directory
+    #     mkdir -p security/reports
+        
+    #     # Update nuclei templates
+    #     nuclei -update-templates
+        
+    #     # Run nuclei scan with OpenAPI integration where possible
+    #     nuclei -u http://localhost:8000 \
+    #           -severity medium,high,critical \
+    #           -t nuclei-templates/http/ \
+    #           -fhr \
+    #           -json -o security/reports/nuclei_report.json \
+    #           -rate-limit 10 \
+    #           -timeout 5 || true
+        
+    #     # Also run specific OpenAPI-based tests if we have an OpenAPI schema path
+    #     echo "Running OpenAPI specific tests based on schema"
+    #     nuclei -u http://localhost:8000/api/v1 \
+    #           -t nuclei-templates/http/openapi/ \
+    #           -fhr \
+    #           -json -o security/reports/nuclei_openapi_report.json \
+    #           -rate-limit 10 \
+    #           -timeout 5 || true
+        
+    #     # Check for vulnerabilities
+    #     if [ -f security/reports/nuclei_report.json ]; then
+    #       CRITICAL=$(grep -c '"severity":"critical"' security/reports/nuclei_report.json || echo 0)
+    #       HIGH=$(grep -c '"severity":"high"' security/reports/nuclei_report.json || echo 0)
+          
+    #       echo "Found vulnerabilities: Critical: $CRITICAL, High: $HIGH"
+          
+    #       if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+    #         echo "Critical or high severity vulnerabilities found!"
+    #         exit 1
+    #       fi
+    #     fi
+        
+    #     # Check OpenAPI specific report
+    #     if [ -f security/reports/nuclei_openapi_report.json ]; then
+    #       OPENAPI_CRITICAL=$(grep -c '"severity":"critical"' security/reports/nuclei_openapi_report.json || echo 0)
+    #       OPENAPI_HIGH=$(grep -c '"severity":"high"' security/reports/nuclei_openapi_report.json || echo 0)
+          
+    #       echo "Found OpenAPI-based vulnerabilities: Critical: $OPENAPI_CRITICAL, High: $OPENAPI_HIGH"
+          
+    #       if [ "$OPENAPI_CRITICAL" -gt 0 ] || [ "$OPENAPI_HIGH" -gt 0 ]; then
+    #         echo "Critical or high severity OpenAPI-based vulnerabilities found!"
+    #         exit 1
+    #       fi
+    #     fi
+    
+    # - name: Upload Security Report as artifact
+    #   uses: actions/upload-artifact@v3
+    #   with:
+    #     name: security-report
+    #     path: security/reports/ 

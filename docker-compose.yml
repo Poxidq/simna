@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  notes_app:
+    build:
+      context: .
+    container_name: notes_app
+    ports:
+      - "8000:8000"  # Backend API
+      - "8501:8501"  # Streamlit frontend
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:///./data/notes.db
+      - SECRET_KEY=${SECRET_KEY:-default_development_secret_DO_NOT_USE_IN_PRODUCTION}
+      - DEBUG=${DEBUG:-True}
+      - RAPIDAPI_KEY=${RAPIDAPI_KEY:-}
+      - USE_MOCK_TRANSLATION=${USE_MOCK_TRANSLATION:-True}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  # Optional service for development
+  dev_tools:
+    image: python:3.11-slim
+    profiles: ["dev"]
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: >
+      bash -c "pip install poetry && 
+               poetry install && 
+               poetry run python -m pytest"
+    environment:
+      - DATABASE_URL=sqlite:///./data/test.db
+      - SECRET_KEY=test_secret_key
+      - DEBUG=True
+      - USE_MOCK_TRANSLATION=True
+    depends_on:
+      notes_app:
+        condition: service_healthy 

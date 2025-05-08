@@ -1,0 +1,70 @@
+[tool.poetry]
+name = "notes_app"
+version = "0.1.0"
+description = "Simple Notes App with translation capabilities"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "backend"}, {include = "frontend"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.108.0"
+uvicorn = "^0.24.0"
+sqlalchemy = "^2.0.23"
+pydantic = "^2.5.2"
+pyjwt = "^2.8.0"
+bcrypt = "^4.0.1"
+python-multipart = "^0.0.6"
+streamlit = "^1.29.0"
+httpx = "^0.25.2"
+pydantic-settings = "^2.9.1"
+email-validator = "^2.2.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.3"
+pytest-cov = "^4.1.0"
+flake8 = "^6.1.0"
+black = "^23.11.0"
+isort = "^5.12.0"
+bandit = "^1.7.5"
+locust = "^2.20.0"
+coverage = "^7.3.2"
+mutmut = "^2.4.4"
+hypothesis = "^6.87.1"
+pytest-asyncio = "^0.21.1"
+flake8-docstrings = "^1.7.0"
+flake8-annotations = "^3.0.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["backend/app/tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+python_classes = "Test*"
+addopts = "--cov=backend"
+
+[tool.coverage.run]
+source = ["backend"]
+omit = ["*/tests/*", "*/migrations/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+    "raise ImportError",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88 
