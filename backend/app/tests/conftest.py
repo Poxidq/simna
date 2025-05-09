@@ -14,11 +14,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from backend.app.core.security import create_access_token, get_current_user, hash_password
+from backend.app.core.security import (
+    create_access_token,
+    get_current_user,
+    hash_password,
+)
 from backend.app.db.database import get_db
 from backend.app.db.models import Base, Note, User
 from backend.main import app
-
 
 # Create test database
 SQLALCHEMY_DATABASE_URL = "sqlite:///./test.db"

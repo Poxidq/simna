@@ -9,7 +9,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from backend.app.api.schemas import (
-    NoteCreate, NoteResponse, NoteUpdate, TranslationRequest, TranslationResponse
+    NoteCreate,
+    NoteResponse,
+    NoteUpdate,
+    TranslationRequest,
+    TranslationResponse,
 )
 from backend.app.core.security import get_current_user
 from backend.app.db.database import atomic_transaction, get_db

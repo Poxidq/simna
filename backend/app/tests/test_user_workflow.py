@@ -3,9 +3,10 @@ Test user workflow.
 
 This module contains end-to-end tests for the complete user journey through the application.
 """
+from unittest.mock import patch
+
 import pytest
 from fastapi import status
-from unittest.mock import patch
 
 from backend.app.services.translation import translate_text
 

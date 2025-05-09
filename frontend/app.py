@@ -11,50 +11,55 @@ The application uses persistent authentication cookies to keep users logged in
 between sessions, ensuring a seamless experience where they don't have to log in
 every time they open the app.
 """
-import os
-import streamlit as st
 import asyncio
-import extra_streamlit_components as stx
 import datetime as dt
 import logging
+import os
+
+import extra_streamlit_components as stx
+import streamlit as st
 
 # Import page configuration and apply at the very beginning, before any other Streamlit calls
-from frontend.utils.theme import get_page_config, apply_theme
+from frontend.utils.theme import apply_theme, get_page_config
+
 # Set page config as the first Streamlit command
 st.set_page_config(**get_page_config())
 
 from frontend.components.auth import (
-    render_login_form, 
-    render_register_form, 
-    render_top_nav
+    render_login_form,
+    render_register_form,
+    render_top_nav,
 )
 from frontend.components.notes import (
-    render_notes_list,
     render_create_note_form,
     render_note_detail,
-    render_notes_view
+    render_notes_list,
+    render_notes_view,
 )
 from frontend.services.auth_service import (
-    login, 
-    register, 
-    logout, 
-    get_current_user,
-    cookie_is_valid,
+    COOKIE_EXPIRY_DAYS,
     COOKIE_NAME,
+    cookie_is_valid,
+    get_current_user,
     get_secret,
+    login,
+    logout,
+    register,
     token_encode,
-    COOKIE_EXPIRY_DAYS
 )
 from frontend.services.notes_service import (
-    create_note, 
-    get_notes, 
-    get_note,
-    update_note,
+    create_note,
     delete_note,
-    translate_note
+    get_note,
+    get_notes,
+    translate_note,
+    update_note,
 )
-from frontend.utils.validators import validate_note_form, validate_login_form, validate_register_form
-
+from frontend.utils.validators import (
+    validate_login_form,
+    validate_note_form,
+    validate_register_form,
+)
 
 # Check if in production environment
 IS_PRODUCTION = get_secret("environment", os.getenv("ENVIRONMENT", "development")).lower() == "production"
@@ -66,30 +71,26 @@ if IS_PRODUCTION and DEBUG_MODE:
 
 
 async def main() -> None:
-    """Main application function."""
-    # Add debug logging for page loads and cookie state
+    """Main function to run the notes app."""
+    # Debug logging for page loads
     if DEBUG_MODE:
-        # Initialize cookie manager early for logging
-        if "cookie_manager" not in st.session_state:
-            st.session_state.cookie_manager = stx.CookieManager()
-        cookies = st.session_state.cookie_manager.get_all(key="debug_log_cookies")
-        has_auth_cookie = COOKIE_NAME in cookies
-        
-        logging.debug(f"============ PAGE LOADED ============")
-        logging.debug(f"Has auth cookie: {has_auth_cookie}")
-        logging.debug(f"Has token in session: {'token' in st.session_state}")
-        if has_auth_cookie:
-            cookie_length = len(cookies.get(COOKIE_NAME, ""))
-            logging.debug(f"Auth cookie length: {cookie_length}")
-        logging.debug(f"======================================")
+        logging.debug("Page loaded/refreshed - checking auth status")
+        # Log cookie state
+        if "cookie_manager" in st.session_state:
+            debug_cookie_key = f"debug_cookies_{dt.datetime.now().timestamp()}"
+            cookies = st.session_state.cookie_manager.get_all(key=debug_cookie_key)
+            logging.debug(f"Cookies present: {list(cookies.keys())}")
+        else:
+            logging.debug("No cookie manager in session state")
+        # Log token state
+        if "token" in st.session_state:
+            logging.debug("Auth token is present in session state")
+        else:
+            logging.debug("No auth token in session state")
     
-    # Initialize session state variables if they don't exist
-    if "token" not in st.session_state:
-        st.session_state.token = None
-    if "user" not in st.session_state:
-        st.session_state.user = None
-    if "current_note" not in st.session_state:
-        st.session_state.current_note = None
+    # Initialize session state variables
+    if "notes" not in st.session_state:
+        st.session_state.notes = []
     if "show_login" not in st.session_state:
         st.session_state.show_login = True
     if "show_register" not in st.session_state:
@@ -129,7 +130,9 @@ async def main() -> None:
                     st.session_state.show_login = True
                     # Remove the invalid cookie
                     try:
-                        st.session_state.cookie_manager.delete(COOKIE_NAME)
+                        # Use a unique key for this cookie operation
+                        cookie_delete_key = f"delete_invalid_token_{dt.datetime.now().timestamp()}"
+                        st.session_state.cookie_manager.delete(COOKIE_NAME, key=cookie_delete_key)
                     except Exception as e:
                         if DEBUG_MODE:
                             logging.debug(f"Failed to delete invalid cookie: {str(e)}")
@@ -154,12 +157,22 @@ async def main() -> None:
                 pass
     
     # Check if user is logged in via token, or if we have a valid cookie
-    # We check for cookies directly here as a fallback in case verification failed 
-    cookies = st.session_state.cookie_manager.get_all(key="auth_flow_cookies")
+    # We check for cookies directly here as a fallback in case verification failed
+    # Use a unique key for this cookie operation 
+    auth_flow_key = f"auth_flow_cookies_{dt.datetime.now().timestamp()}"
+    cookies = st.session_state.cookie_manager.get_all(key=auth_flow_key)
     has_auth_cookie = COOKIE_NAME in cookies
     
     if st.session_state.token or has_auth_cookie:
         # User is authenticated or has auth cookie - show main UI
+        
+        # Load notes list if authenticated and notes not loaded yet
+        if st.session_state.get("token") and not st.session_state.notes:
+            # Use await to properly get the notes from the async function
+            notes = await get_notes()
+            # No need to check success as get_notes() now returns the actual notes list
+            if not notes and DEBUG_MODE:
+                logging.debug("No notes found during initialization")
         
         # After authentication, check if we need to restore a specific note
         # This happens when user refreshes while viewing a note
@@ -199,11 +212,13 @@ async def main() -> None:
                 # Create JWT for the cookie with current view state
                 cookie_token = token_encode(st.session_state.token, exp_date, user_info)
                 
-                # Set the cookie with the JWT
+                # Set the cookie with the JWT - use a unique key
+                cookie_update_key = f"update_view_state_{dt.datetime.now().timestamp()}"
                 st.session_state.cookie_manager.set(
                     COOKIE_NAME,
                     cookie_token,
-                    expires_at=exp_date
+                    expires_at=exp_date,
+                    key=cookie_update_key
                 )
             except Exception as e:
                 if DEBUG_MODE:
@@ -298,9 +313,12 @@ async def main_content() -> None:
                     )
                     
                     if updated_note:
+                        # Refresh the notes list
+                        with st.spinner("Processing..."):
+                            notes = await get_notes()
+                        
                         st.success("Note updated successfully!")
-                        st.session_state.current_note = updated_note
-                        st.session_state.edit_mode = False
+                        st.rerun()
                     else:
                         st.error("Failed to update note.")
             

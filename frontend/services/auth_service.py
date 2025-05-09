@@ -1,22 +1,23 @@
 """
 Authentication service.
 
-This module provides functions for user authentication and management.
+This module provides authentication related functions.
 """
-import os
-import logging
-import streamlit as st
 import datetime as dt
-import jwt
+import logging
+import os
 import secrets
 import sys
-from typing import Dict, Tuple, Any, Optional, Union, List, cast, TypeVar, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union, cast
+
+import jwt
+import streamlit as st
+
 from frontend.services.api import api_request
 
-
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("auth_service")
+logging.basicConfig(level=logging.DEBUG if os.getenv("DEBUG_MODE", "False").lower() == "true" else logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Debug mode setting
 DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
@@ -38,7 +39,7 @@ def generate_secure_key(length: int = 32) -> str:
     return secrets.token_hex(length)
 
 # Cookie settings
-COOKIE_NAME = "notes_app_auth"
+COOKIE_NAME = "notes_auth"
 DEFAULT_KEY = "notes_app_cookie_key"
 # Get cookie key from secrets or environment
 COOKIE_KEY_FROM_CONFIG = get_secret("cookie_key", os.getenv("COOKIE_KEY"))
@@ -285,105 +286,78 @@ async def login(username: str, password: str) -> Tuple[bool, Optional[str]]:
             )
             
             if response and "access_token" in response:
-                token: str = response["access_token"]
-                
-                if DEBUG_MODE:
-                    token_preview = token[:10] + "..." if len(token) > 10 else token
-                    logging.debug(f"Login successful. Token received: {token_preview}")
-                
                 # Store token in session state
-                st.session_state.token = token
+                st.session_state.token = response["access_token"]
                 
-                # Get current user
-                success, error_msg = await get_current_user()
-                if success:
-                    # If login was successful, store the token in a cookie for persistent login
-                    if "cookie_manager" in st.session_state:
-                        try:
-                            # Set expiration date for the cookie
-                            exp_date = dt.datetime.now(dt.UTC) + dt.timedelta(days=COOKIE_EXPIRY_DAYS)
-                            user_info = st.session_state.get("user", {})
-                            
-                            # Create JWT for the cookie
-                            cookie_token = token_encode(token, exp_date, user_info)
-                            
-                            # Set the cookie with the JWT
-                            st.session_state.cookie_manager.set(
-                                COOKIE_NAME,
-                                cookie_token,
-                                expires_at=exp_date
-                            )
-                            
-                            if DEBUG_MODE:
-                                logging.debug(f"Set auth cookie, expires: {exp_date}")
-                        except Exception as cookie_e:
-                            if DEBUG_MODE:
-                                logging.error(f"Failed to set auth cookie: {str(cookie_e)}")
-                    
-                    st.success("Login successful!")
+                # Clear any login errors
+                if "login_error" in st.session_state:
+                    del st.session_state.login_error
+                
+                # Get user details
+                user_success, error = await get_current_user()
+                if user_success:
+                    logger.info(f"User logged in successfully: {st.session_state.get('user', {}).get('username', 'unknown')}")
                     return True, None
                 else:
-                    error_message = "Login successful, but couldn't fetch user information."
-                    if DEBUG_MODE:
-                        logging.error(f"Failed to get current user after login: {error_msg}")
-                    
-                    # Even though we can't get user info, we still have a token, so consider it a success
-                    # but warn the user
-                    st.warning(error_message)
-                    return True, error_message
-            
-            # Handle failed login
+                    logger.error(f"Failed to fetch user details after login: {error}")
+                    return False, error
             else:
-                error_message = "Login failed. Please check your credentials."
-                if DEBUG_MODE:
-                    logging.error(f"Login failed. Response: {response}")
-                # st.error(error_message)
-                return False, error_message
+                error_msg = "Invalid username or password"
+                st.session_state.login_error = error_msg
+                return False, error_msg
                 
         except Exception as e:
-            error_message = f"Error during login: {str(e)}"
-            if DEBUG_MODE:
-                logging.exception("Login exception")
-            # st.error(error_message)
-            return False, error_message
+            error_msg = f"Login error: {str(e)}"
+            logger.error(error_msg)
+            st.session_state.login_error = error_msg
+            return False, error_msg
 
 
-async def register(username: str, email: str, password: str) -> bool:
+async def register(username: str, email: str, password: str) -> Tuple[bool, Optional[str]]:
     """
     Register a new user.
-
+    
     Args:
-        username: Username
-        email: Email
-        password: Password
-
+        username: User's username
+        email: User's email
+        password: User's password
+        
     Returns:
-        bool: Success status
+        Tuple[bool, Optional[str]]: Success status and optional error message
     """
-    try:
-        with st.spinner("Creating your account..."):
+    if not username or not email or not password:
+        error_msg = "Please fill in all required fields"
+        st.session_state.register_error = error_msg
+        return False, error_msg
+    
+    with st.spinner("Creating your account..."):
+        try:
             response: Optional[Dict[str, Any]] = await api_request(
-                "POST", 
-                "/auth/register", 
-                data={"username": username, "email": email, "password": password}
+                "POST",
+                "/auth/register",
+                data={
+                    "username": username,
+                    "email": email,
+                    "password": password
+                }
             )
             
-            if response:
-                st.success("Registration successful! You can now log in.")
-                # Debug info
-                if DEBUG_MODE:
-                    logger.debug(f"Registration success: {response}")
-                return True
+            if response and "id" in response:
+                # Registration successful, now login
+                st.success("Account created successfully! You may now log in.")
+                return True, None
             else:
-                # Registration failed, api_request has already displayed an error
                 if DEBUG_MODE:
-                    logger.error("Registration failed. Response was None.")
-                return False
-    except Exception as e:
-        st.error(f"An unexpected error occurred")
-        if DEBUG_MODE:
-            logger.exception(f"Registration exception: {str(e)}")
-        return False
+                    logger.debug(f"Registration failed, response: {response}")
+                error_msg = "Registration failed. Please try again."
+                st.session_state.register_error = error_msg
+                return False, error_msg
+                
+        except Exception as e:
+            error_msg = f"Registration error: {str(e)}"
+            logger.error(error_msg)
+            st.session_state.register_error = error_msg
+            return False, error_msg
 
 
 async def get_current_user() -> Tuple[bool, Optional[str]]:
@@ -416,15 +390,20 @@ async def get_current_user() -> Tuple[bool, Optional[str]]:
             st.session_state.user = response
             
             # Update cookie with latest user info if we have a cookie manager
-            if "cookie_manager" in st.session_state and COOKIE_NAME in st.session_state.cookie_manager.get_all(key="update_cookie"):
+            if "cookie_manager" in st.session_state:
                 try:
-                    exp_date = dt.datetime.now(dt.UTC) + dt.timedelta(days=COOKIE_EXPIRY_DAYS)
+                    exp_date = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=COOKIE_EXPIRY_DAYS)
                     cookie_token = token_encode(token, exp_date, response)
+                    # Use a unique key for this cookie operation
+                    cookie_update_key = f"set_auth_cookie_{dt.datetime.now().timestamp()}"
                     st.session_state.cookie_manager.set(
                         COOKIE_NAME,
                         cookie_token,
-                        expires_at=exp_date
+                        expires_at=exp_date,
+                        key=cookie_update_key
                     )
+                    if DEBUG_MODE:
+                        logging.debug(f"Updated auth cookie with expiration: {exp_date.isoformat()}")
                 except Exception as e:
                     if DEBUG_MODE:
                         logging.error(f"Failed to update auth cookie: {str(e)}")
@@ -444,13 +423,17 @@ async def get_current_user() -> Tuple[bool, Optional[str]]:
             # Clear cookie if it exists since token is invalid
             if "cookie_manager" in st.session_state:
                 try:
-                    st.session_state.cookie_manager.delete(COOKIE_NAME)
+                    # Use a unique key for this cookie operation
+                    cookie_delete_key = f"delete_auth_cookie_invalid_{dt.datetime.now().timestamp()}"
+                    st.session_state.cookie_manager.delete(COOKIE_NAME, key=cookie_delete_key)
                     if DEBUG_MODE:
                         logging.debug("Deleted invalid auth cookie")
                 except Exception as cookie_e:
                     if DEBUG_MODE:
                         logging.error(f"Failed to delete auth cookie: {str(cookie_e)}")
                         
+            # Redirect to login
+            st.session_state["show_login"] = True
             return False, "Could not retrieve user details"
             
     except Exception as e:
@@ -468,49 +451,64 @@ async def get_current_user() -> Tuple[bool, Optional[str]]:
             # Clear cookie if it exists
             if "cookie_manager" in st.session_state:
                 try:
-                    st.session_state.cookie_manager.delete(COOKIE_NAME)
+                    # Use a unique key for this cookie operation
+                    cookie_delete_key = f"delete_auth_cookie_expired_{dt.datetime.now().timestamp()}"
+                    st.session_state.cookie_manager.delete(COOKIE_NAME, key=cookie_delete_key)
                     if DEBUG_MODE:
                         logging.debug("Deleted expired auth cookie")
                 except Exception as cookie_e:
                     if DEBUG_MODE:
                         logging.error(f"Failed to delete auth cookie: {str(cookie_e)}")
-                        
+            
+            # Redirect to login
+            st.session_state["show_login"] = True        
             return False, "Your session has expired. Please log in again."
         
         if DEBUG_MODE:
-            logging.debug(f"Error getting current user: {error_msg}")
+            logging.exception(f"Error getting current user: {error_msg}")
         return False, f"Error fetching user data: {error_msg}"
 
 
 def logout() -> None:
     """
-    Logout the current user.
-    
-    Returns:
-        None
+    Log out the current user by clearing session state and cookie.
     """
-    if "token" in st.session_state:
-        del st.session_state.token
-    if "user" in st.session_state:
-        del st.session_state.user
-    if "auth_checked" in st.session_state:
-        del st.session_state.auth_checked
-    
-    # Delete the authentication cookie if it exists
-    if "cookie_manager" in st.session_state:
-        try:
-            st.session_state.cookie_manager.delete(COOKIE_NAME)
-            if DEBUG_MODE:
-                logger.debug("Deleted auth cookie during logout")
-        except Exception as e:
-            if DEBUG_MODE:
-                logger.error(f"Failed to delete auth cookie: {str(e)}")
-    
-    # Debug info
-    if DEBUG_MODE:
-        logger.debug("User logged out")
-    
-    st.success("You have been logged out successfully.")
-    
-    # Force a rerun to update the UI
-    st.rerun() 
+    try:
+        # Clear session state
+        if "token" in st.session_state:
+            del st.session_state.token
+        if "user" in st.session_state:
+            del st.session_state.user
+        if "auth_checked" in st.session_state:
+            del st.session_state.auth_checked
+            
+        # Clear cookie
+        if "cookie_manager" in st.session_state:
+            try:
+                # Use a unique key for this cookie operation
+                cookie_delete_key = f"delete_auth_cookie_logout_{dt.datetime.now().timestamp()}"
+                st.session_state.cookie_manager.delete(COOKIE_NAME, key=cookie_delete_key)
+                if DEBUG_MODE:
+                    logging.debug("Auth cookie deleted during logout")
+            except Exception as e:
+                if DEBUG_MODE:
+                    logging.error(f"Failed to delete auth cookie: {str(e)}")
+                    
+        # Reset UI state
+        st.session_state.show_login = True
+        st.session_state.show_register = False
+        
+        # Clear any other app state
+        if "notes" in st.session_state:
+            del st.session_state.notes
+        if "current_note" in st.session_state:
+            del st.session_state.current_note
+            
+        if DEBUG_MODE:
+            logger.debug("User logged out successfully")
+        
+        st.success("You have been logged out successfully.")
+        st.rerun()
+    except Exception as e:
+        logger.error(f"Error during logout: {str(e)}")
+        return 

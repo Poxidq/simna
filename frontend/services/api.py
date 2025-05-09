@@ -4,14 +4,13 @@ API service.
 This module provides functions for communicating with the backend API.
 """
 
-import os
 import json
 import logging
-from typing import Dict, Optional, Tuple, List, Any, Union, TypeVar, cast, NoReturn
+import os
+from typing import Any, Dict, List, NoReturn, Optional, Tuple, TypeVar, Union, cast
 
 import httpx
 import streamlit as st
-
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

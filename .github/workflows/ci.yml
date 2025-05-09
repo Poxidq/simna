@@ -2,9 +2,9 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
   pull_request:
-    branches: [ main ]
+    branches: [ master ]
 
 jobs:
   quality-checks:
@@ -35,13 +35,242 @@ jobs:
     - name: Run isort
       run: poetry run isort --check-only frontend backend
         
-    - name: Run Bandit
-      run: poetry run bandit -r frontend backend -f json -o bandit-results.json
-      
-    - name: Run Radon
+    - name: Check code documentation
       run: |
-        poetry run radon mi frontend backend -s
-        poetry run radon cc frontend backend -a -s
+        poetry run pydocstyle frontend backend || echo "Some docstring issues found"
+        # Create our custom document coverage script
+        cat > check_docstrings.py << 'EOF'
+import ast
+import os
+import sys
+from typing import Dict, List, Set, Tuple
+
+def has_docstring(node: ast.AST) -> bool:
+    if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+        return False
+    
+    if (node.body and isinstance(node.body[0], ast.Expr) and 
+            isinstance(node.body[0].value, ast.Str)):
+        return True
+    return False
+
+def get_docstring_stats(file_path: str) -> Tuple[int, int, List[str]]:
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        print(f"Syntax error in file: {file_path}")
+        return 0, 0, []
+    
+    missing: List[str] = []
+    need_docstring_count = 0
+    has_docstring_count = 0
+    
+    if has_docstring(tree):
+        has_docstring_count += 1
+    else:
+        need_docstring_count += 1
+        missing.append(f"Module docstring in {file_path}")
+    
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+            if has_docstring(node):
+                has_docstring_count += 1
+            else:
+                need_docstring_count += 1
+                if isinstance(node, ast.ClassDef):
+                    missing.append(f"Class '{node.name}' at line {node.lineno}")
+                else:
+                    missing.append(f"Function '{node.name}' at line {node.lineno}")
+    
+    return need_docstring_count, has_docstring_count, missing
+
+def check_directory(directory: str, exclude: Set[str] = None) -> Dict[str, Tuple[int, int]]:
+    if exclude is None:
+        exclude = set()
+        
+    results = {}
+    
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if d not in exclude and not d.startswith('.')]
+        
+        for file in files:
+            if file.endswith('.py'):
+                file_path = os.path.join(root, file)
+                need_count, has_count, missing = get_docstring_stats(file_path)
+                
+                if need_count + has_count > 0:  # Only include files with at least one function/class
+                    results[file_path] = (need_count, has_count)
+    
+    return results
+
+def calculate_coverage(results: Dict[str, Tuple[int, int]]) -> float:
+    total_need = sum(need for need, _ in results.values())
+    total_has = sum(has for _, has in results.values())
+    
+    if total_need + total_has == 0:
+        return 100.0
+    
+    return (total_has / (total_need + total_has)) * 100.0
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python check_docstrings.py directory1 [directory2 ...] [--min-percentage=90.0]")
+        sys.exit(1)
+    
+    dirs = [arg for arg in sys.argv[1:] if not arg.startswith('--')]
+    
+    min_pct = 90.0
+    for arg in sys.argv[1:]:
+        if arg.startswith('--min-percentage='):
+            try:
+                min_pct = float(arg.split('=')[1])
+            except (IndexError, ValueError):
+                print(f"Invalid min-percentage value: {arg}")
+                sys.exit(1)
+    
+    exclude = {'__pycache__', 'venv', '.venv', 'env', '.env', '.git', 'migrations'}
+    
+    all_results = {}
+    for directory in dirs:
+        results = check_directory(directory, exclude)
+        all_results.update(results)
+    
+    coverage = calculate_coverage(all_results)
+    
+    print(f"Docstring coverage: {coverage:.2f}%")
+    
+    if coverage < min_pct:
+        print(f"Coverage below the minimum requirement of {min_pct}%")
+        sys.exit(1)
+    else:
+        print(f"Coverage meets or exceeds the minimum requirement of {min_pct}%")
+EOF
+        # Run our custom script
+        python check_docstrings.py frontend backend --min-percentage=90
+        
+    - name: Check maintainability
+      run: |
+        # Create our custom maintainability script
+        cat > check_maintainability.py << 'EOF'
+import ast
+import math
+import os
+import sys
+from typing import Dict, List, Set, Tuple
+
+def calculate_cyclomatic_complexity(node: ast.AST) -> int:
+    complexity = 1  # Base complexity
+    
+    for child in ast.walk(node):
+        # Control flow statements increase complexity
+        if isinstance(child, (ast.If, ast.While, ast.For)):
+            complexity += 1
+        # Logical operators are counted
+        elif isinstance(child, ast.BoolOp) and isinstance(child.op, ast.And):
+            complexity += len(child.values) - 1
+        elif isinstance(child, ast.BoolOp) and isinstance(child.op, ast.Or):
+            complexity += len(child.values) - 1
+        # Exception handlers
+        elif isinstance(child, ast.ExceptHandler):
+            complexity += 1
+        # Comprehensions
+        elif isinstance(child, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            complexity += len(child.generators)
+    
+    return complexity
+
+def analyze_file(file_path: str) -> Dict[str, any]:
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            code = f.read()
+    except (IOError, UnicodeDecodeError):
+        return {"cc": 0, "mi": 0, "file_path": file_path}
+    
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return {"cc": 0, "mi": 0, "file_path": file_path}
+    
+    # Simple maintainability calculation
+    lines = code.split('\n')
+    loc = len([line for line in lines if line.strip() and not line.strip().startswith('#')])
+    comments = len([line for line in lines if line.strip().startswith('#')])
+    
+    # Calculate complexity
+    complexity = calculate_cyclomatic_complexity(tree)
+    
+    # Simple maintainability index formula
+    comment_ratio = comments / max(loc, 1) * 100
+    mi = 100 - (complexity * 0.2) - (loc * 0.05) + (comment_ratio * 0.1)
+    mi = max(0, min(100, mi))  # Normalize to 0-100
+    
+    return {
+        "cc": complexity,
+        "mi": mi,
+        "file_path": file_path,
+    }
+
+def analyze_directory(directory: str, exclude: Set[str] = None) -> List[Dict[str, any]]:
+    if exclude is None:
+        exclude = set()
+        
+    results = []
+    
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if d not in exclude and not d.startswith('.')]
+        
+        for file in files:
+            if file.endswith('.py'):
+                file_path = os.path.join(root, file)
+                results.append(analyze_file(file_path))
+    
+    return results
+
+def calculate_average_mi(results: List[Dict[str, any]]) -> float:
+    if not results:
+        return 0.0
+    
+    total_mi = sum(result["mi"] for result in results)
+    return total_mi / len(results)
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python check_maintainability.py directory1 [directory2 ...] [--min-mi=70.0]")
+        sys.exit(1)
+    
+    dirs = [arg for arg in sys.argv[1:] if not arg.startswith('--')]
+    
+    min_mi = 70.0
+    for arg in sys.argv[1:]:
+        if arg.startswith('--min-mi='):
+            try:
+                min_mi = float(arg.split('=')[1])
+            except (IndexError, ValueError):
+                print(f"Invalid min-mi value: {arg}")
+                sys.exit(1)
+    
+    exclude = {'__pycache__', 'venv', '.venv', 'env', '.env', '.git', 'migrations'}
+    
+    all_results = []
+    for directory in dirs:
+        results = analyze_directory(directory, exclude)
+        all_results.extend(results)
+    
+    average_mi = calculate_average_mi(all_results)
+    
+    print(f"Average Maintainability Index: {average_mi:.2f}")
+    
+    if average_mi < min_mi:
+        print(f"Average maintainability below the minimum requirement of {min_mi}")
+        sys.exit(1)
+    else:
+        print(f"Maintainability meets or exceeds the minimum requirement of {min_mi}")
+EOF
+        # Run our custom script instead of radon
+        python check_maintainability.py frontend backend --min-mi=70
         
   test:
     runs-on: ubuntu-latest
@@ -78,8 +307,21 @@ jobs:
     - name: Run tests with coverage
       env:
         DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+        RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        SECRET_KEY: ${{ secrets.SECRET_KEY }}
+        USE_MOCK_TRANSLATION: ${{ secrets.USE_MOCK_TRANSLATION || 'True' }}
       run: |
-        poetry run pytest --cov=frontend --cov=backend --cov-report=xml --cov-report=term-missing
+        poetry run pytest --cov=frontend --cov=backend --cov-report=xml --cov-report=term-missing --cov-fail-under=60
+        
+    - name: Check test pass rate
+      run: |
+        TOTAL_TESTS=$(poetry run pytest --collect-only -q | wc -l)
+        PASSED_TESTS=$(poetry run pytest -v | grep "PASSED" | wc -l)
+        PASS_RATE=$((PASSED_TESTS * 100 / TOTAL_TESTS))
+        if [ $PASS_RATE -lt 90 ]; then
+          echo "Test pass rate is below 90% (current: $PASS_RATE%)"
+          exit 1
+        fi
         
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
@@ -105,9 +347,29 @@ jobs:
     - name: Install dependencies
       run: poetry install
         
+    - name: Start API server
+      env:
+        RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        SECRET_KEY: ${{ secrets.SECRET_KEY }}
+        USE_MOCK_TRANSLATION: ${{ secrets.USE_MOCK_TRANSLATION || 'True' }}
+      run: |
+        poetry run uvicorn backend.main:app --host 0.0.0.0 --port 8000 &
+        sleep 10  # Wait for server to start
+        
     - name: Run Locust performance tests
       run: |
-        poetry run locust -f locustfile.py --headless -u 20 -r 1 --run-time 1m --host http://localhost:8000
+        poetry run locust -f locustfile.py --headless -u 20 -r 1 --run-time 1m --host http://localhost:8000 --expect-workers 1
+        
+    - name: Check API response times
+      run: |
+        # Test key endpoints response times
+        for endpoint in "/api/v1/notes" "/api/v1/auth/login"; do
+          response_time=$(curl -w "%{time_total}" -o /dev/null -s "http://localhost:8000$endpoint")
+          if (( $(echo "$response_time > 0.2" | bc -l) )); then
+            echo "Response time for $endpoint exceeds 200ms (current: ${response_time}s)"
+            exit 1
+          fi
+        done
         
   security:
     runs-on: ubuntu-latest
@@ -137,6 +399,41 @@ jobs:
           cat bandit-results.json
           exit 1
         fi
+        
+    - name: Check JWT token handling
+      run: |
+        poetry run python -c "
+        from backend.app.core.security import create_access_token, verify_token
+        token = create_access_token({'sub': 'test'})
+        assert verify_token(token) is not None, 'JWT token verification failed'
+        "
+        
+    - name: Check password hashing
+      run: |
+        poetry run python -c "
+        import bcrypt
+        password = b'testpass'
+        hashed = bcrypt.hashpw(password, bcrypt.gensalt())
+        assert bcrypt.checkpw(password, hashed), 'Password hashing verification failed'
+        "
+        
+    - name: Check sensitive data exposure
+      run: |
+        poetry run python -c "
+        import re
+        with open('backend/app/api/endpoints/notes.py', 'r') as f:
+            content = f.read()
+        sensitive_patterns = [
+            r'password',
+            r'secret',
+            r'api_key',
+            r'token'
+        ]
+        for pattern in sensitive_patterns:
+            if re.search(pattern, content, re.IGNORECASE):
+                print(f'Potential sensitive data exposure found: {pattern}')
+                exit(1)
+        "
 
   api-docs-and-security:
     runs-on: ubuntu-latest

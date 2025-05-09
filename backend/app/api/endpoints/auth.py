@@ -12,7 +12,10 @@ from sqlalchemy.orm import Session
 from backend.app.api.schemas import Token, UserCreate, UserLogin, UserResponse
 from backend.app.core.config import settings
 from backend.app.core.security import (
-    create_access_token, get_current_user, hash_password, verify_password
+    create_access_token,
+    get_current_user,
+    hash_password,
+    verify_password,
 )
 from backend.app.db.database import get_db
 from backend.app.db.models import User

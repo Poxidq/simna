@@ -4,11 +4,11 @@ Database models for the Notes App.
 This module contains SQLAlchemy ORM models that represent the database schema.
 """
 from datetime import datetime
-from typing import List, Optional, ClassVar, Any, TYPE_CHECKING, cast, Type
+from typing import TYPE_CHECKING, Any, ClassVar, List, Optional, Type, cast
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 # Create base class
 Base = declarative_base()
@@ -16,6 +16,7 @@ Base = declarative_base()
 # Forward references for type checking
 if TYPE_CHECKING:
     from typing import List
+
     # Define these as strings to avoid the redefinition issue
     UserType = 'User'
     NoteType = 'Note'

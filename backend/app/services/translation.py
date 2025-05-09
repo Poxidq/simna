@@ -5,7 +5,7 @@ This module provides functionality for translating text from Russian to English.
 """
 import json
 import re
-from typing import Dict, Optional, Any, TypedDict, Union, cast
+from typing import Any, Dict, Optional, TypedDict, Union, cast
 
 import httpx
 from fastapi import HTTPException, status
@@ -93,7 +93,7 @@ async def translate_text(
             "source_language": source_lang,
             "target_language": target_lang
         }
-        
+    logger.info(f"TRANSLATION_API_KEY: {settings.TRANSLATION_API_KEY[:5] + '...' if settings.TRANSLATION_API_KEY else None}")
     # For development/testing purposes, mock translation if no API key or mock is enabled
     if settings.USE_MOCK_TRANSLATION or not settings.TRANSLATION_API_KEY or settings.TESTING:
         logger.info("Using simplified mock translation (USE_MOCK_TRANSLATION=True or missing API key)")

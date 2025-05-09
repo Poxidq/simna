@@ -5,8 +5,9 @@ This module contains tests for the frontend Streamlit application workflow.
 """
 import os
 import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
 
 # Make sure the module path is correct
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -14,10 +15,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 # Import streamlit for mock
 import streamlit as st
 
-# Import the modules to test
-from frontend.services.auth_service import login, register, get_current_user
-from frontend.services.notes_service import get_notes, create_note, update_note, delete_note, translate_note
 from frontend.app import main
+
+# Import the modules to test
+from frontend.services.auth_service import get_current_user, login, register
+from frontend.services.notes_service import (
+    create_note,
+    delete_note,
+    get_notes,
+    translate_note,
+    update_note,
+)
 
 
 @pytest.fixture

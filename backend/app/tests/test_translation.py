@@ -3,10 +3,10 @@ Tests for translation service.
 
 This module contains tests for text translation functionality.
 """
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from fastapi import status
-from unittest.mock import AsyncMock, patch, MagicMock
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 
 from backend.app.core.config import settings
 from backend.app.services.translation import is_russian_text, translate_text

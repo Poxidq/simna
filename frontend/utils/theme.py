@@ -5,7 +5,7 @@ This module contains theme-related functions.
 """
 
 import os
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
 import streamlit as st
 

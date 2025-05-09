@@ -4,12 +4,12 @@ Authentication components.
 This module contains authentication UI components.
 """
 import os
-from typing import Tuple, Dict, Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import streamlit as st
 
-from frontend.state.app_state import AppState
 from frontend.services.auth_service import logout as auth_logout
+from frontend.state.app_state import AppState
 
 
 def render_login_form() -> None:

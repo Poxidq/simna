@@ -1,12 +1,15 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 import streamlit as st
+
 from frontend.components.notes import (
-    render_notes_list,
-    render_note_detail,
+    contains_russian,
     render_create_note_form,
-    contains_russian
+    render_note_detail,
+    render_notes_list,
 )
+
 
 @pytest.fixture
 def mock_session_state():

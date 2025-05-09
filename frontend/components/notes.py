@@ -3,14 +3,16 @@ Notes UI components.
 
 This module contains UI components for displaying and interacting with notes.
 """
-from typing import List, Dict, Any, Optional
-import streamlit as st
-import threading
+import asyncio
+import json
 import logging
 import os
-import httpx
-import json
 import time
+from functools import wraps
+from typing import Any, Dict, List, Optional
+
+import httpx
+import streamlit as st
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG if os.getenv("DEBUG_MODE", "False").lower() == "true" else logging.INFO)
@@ -19,30 +21,67 @@ logger = logging.getLogger(__name__)
 # Import services at the module level
 from frontend.services import notes_service
 from frontend.services.api import api_request
-from frontend.services.notes_service import get_translation_preview
-from frontend.services.notes_service import translate_note
 
-def get_translation_thread():
-    """Thread function to handle translation preview requests."""
-    try:
-        # Get token and note_id from session state before thread starts
+# State keys for better organization
+STATE_KEYS = {
+    "TRANSLATION": {
+        "IN_PROGRESS": "_translation_in_progress",
+        "COMPLETE": "_translation_complete",
+        "ERROR": "_translation_error",
+        "REQUESTED": "_translate_note_requested",
+    },
+    "PREVIEW": {
+        "VISIBLE": "_show_live_translation",
+        "LOADING": "_translation_preview_loading",
+        "RESULT": "_translation_preview_result",
+        "ERROR": "_translation_preview_error",
+    }
+}
+
+def check_auth(func):
+    """Decorator to check authentication before executing a function."""
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        # Get token from session state
         token = st.session_state.get("token")
-        note_id = st.session_state.get("current_note", {}).get("id")
-        
         if not token:
-            logger.error("Translation preview attempted without auth token")
-            st.session_state["_translation_preview_error"] = "Authentication required"
-            st.session_state["_translation_preview_loading"] = False
+            logger.error("Operation attempted without auth token")
             # Redirect to login
             st.session_state["show_login"] = True
-            st.rerun()
-            return
+            return None
+        
+        # Add token to kwargs and call function
+        kwargs["token"] = token
+        return await func(*args, **kwargs)
+    return wrapper
+
+@check_auth
+async def get_translation_preview(note_id: Optional[int] = None, token: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get a translation preview for a note.
+    
+    Args:
+        note_id: ID of the note to translate
+        token: Authentication token
+        
+    Returns:
+        Dict containing translation result or error
+    """
+    result = {
+        "success": False,
+        "translated_text": None,
+        "error": None
+    }
+    
+    try:
+        # Validate note ID
+        if not note_id:
+            note_id = st.session_state.get("current_note", {}).get("id")
             
         if not note_id:
-            logger.error("No note ID available for translation")
-            st.session_state["_translation_preview_error"] = "No note selected"
-            st.session_state["_translation_preview_loading"] = False
-            return
+            logger.error("No note ID available for translation preview")
+            result["error"] = "No note selected"
+            return result
         
         # Get API base URL from environment or use default
         api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
@@ -52,85 +91,85 @@ def get_translation_thread():
         
         # Set up headers with authorization
         headers = {
-            "Content-Type": "application/json", 
+            "Content-Type": "application/json",
             "Authorization": f"Bearer {token}" if not token.startswith("Bearer ") else token
         }
         
         logger.info(f"Making translation preview request to: {url}")
         
-        # Make the request
-        response = httpx.post(url, headers=headers, timeout=10.0)
-        
-        if response.status_code == 401:
-            # Token is invalid or expired
-            logger.error("Authentication failed during translation preview")
-            st.session_state["_translation_preview_error"] = "Authentication failed. Please log in again."
-            # Clear token and redirect to login
-            if "token" in st.session_state:
-                del st.session_state["token"]
-            if "user" in st.session_state:
-                del st.session_state["user"]
-            st.session_state["show_login"] = True
-            st.rerun()
-            return
+        # Make async request
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, headers=headers)
             
-        if response.status_code == 200:
-            # Successfully got translation preview
-            response_data = response.json()
-            if "translated_text" in response_data:
-                st.session_state["_translation_preview_result"] = response_data["translated_text"]
-                logger.info(f"Translation preview successful, received text of length: {len(response_data['translated_text'])}")
+            if response.status_code == 401:
+                # Token is invalid or expired
+                logger.error("Authentication failed during translation preview")
+                result["error"] = "Authentication failed. Please log in again."
+                # Clear token and redirect to login
+                if "token" in st.session_state:
+                    del st.session_state["token"]
+                if "user" in st.session_state:
+                    del st.session_state["user"]
+                st.session_state["show_login"] = True
+                return result
+                
+            if response.status_code == 200:
+                # Parse the response
+                response_data = response.json()
+                logger.info(f"Translation preview successful, received response with fields: {list(response_data.keys())}")
+                
+                # Get the translated text from the response
+                if "translated_text" in response_data:
+                    result["translated_text"] = response_data["translated_text"]
+                    result["success"] = True
+                else:
+                    logger.error("Translation preview response missing translated_text field")
+                    result["error"] = "Invalid response from translation service"
             else:
-                logger.error(f"Translation preview response missing translated_text field: {list(response_data.keys())}")
-                st.session_state["_translation_preview_error"] = "Invalid response from server"
-        else:
-            error_message = f"Translation preview failed with status code: {response.status_code}"
-            logger.error(error_message)
-            try:
-                error_detail = response.json()
-                logger.error(f"Error details: {error_detail}")
-            except:
-                error_detail = response.text[:100]
-                logger.error(f"Error response: {error_detail}")
-            
-            st.session_state["_translation_preview_error"] = f"Error: {response.status_code}"
+                error_message = f"Translation preview failed with status code: {response.status_code}"
+                logger.error(error_message)
+                try:
+                    error_detail = response.json()
+                    logger.error(f"Error details: {error_detail}")
+                    result["error"] = error_detail.get("detail", error_message)
+                except:
+                    error_detail = response.text[:100]
+                    logger.error(f"Error response: {error_detail}")
+                    result["error"] = error_message
     except Exception as e:
         error_message = f"Error during translation preview: {str(e)}"
         logger.exception(error_message)
-        st.session_state["_translation_preview_error"] = str(e)
-    finally:
-        # Mark loading as complete
-        st.session_state["_translation_preview_loading"] = False
-        # Try to force UI refresh
-        try:
-            st.rerun()
-        except:
-            pass
+        result["error"] = error_message
+            
+    return result
 
-def translate_task():
-    """Thread function to handle full translation requests."""
-    try:
-        # Get token and note_id from session state before thread starts
-        token = st.session_state.get("token")
-        note_id = st.session_state.get("current_note", {}).get("id")
+@check_auth
+async def translate_note_async(note_id: Optional[int] = None, token: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Translate a note and save the result.
+    
+    Args:
+        note_id: ID of the note to translate
+        token: Authentication token
         
-        if not token:
-            logger.error("Translation attempted without auth token")
-            st.session_state["_translation_error"] = "Authentication required for translation"
-            st.session_state["_translation_in_progress"] = False
-            # Redirect to login
-            st.session_state["show_login"] = True
-            st.rerun()
-            return
+    Returns:
+        Dict containing translation result or error
+    """
+    result = {
+        "success": False,
+        "note": None,
+        "error": None
+    }
+    
+    try:
+        # Validate note ID
+        if not note_id:
+            note_id = st.session_state.get("current_note", {}).get("id")
             
         if not note_id:
             logger.error("No note ID available for translation")
-            st.session_state["_translation_error"] = "No note selected"
-            st.session_state["_translation_in_progress"] = False
-            return
-        
-        # Add a small delay to let UI update before starting translation
-        time.sleep(0.5)
+            result["error"] = "No note selected"
+            return result
         
         # Get API base URL from environment or use default
         api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
@@ -146,115 +185,158 @@ def translate_task():
         
         logger.info(f"Making full translation request to: {url}")
         
-        # Use synchronous request in the thread to avoid asyncio issues
-        response = httpx.post(url, headers=headers, timeout=30.0)
-        
-        if response.status_code == 401:
-            # Token is invalid or expired
-            logger.error("Authentication failed during translation")
-            st.session_state["_translation_error"] = "Authentication failed. Please log in again."
-            # Clear token and redirect to login
-            if "token" in st.session_state:
-                del st.session_state["token"]
-            if "user" in st.session_state:
-                del st.session_state["user"]
-            st.session_state["show_login"] = True
-            st.rerun()
-            return
+        # Make async request
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, headers=headers)
             
-        if response.status_code == 200:
-            # Parse the response
-            response_data = response.json()
-            logger.info(f"Translation successful, received response with fields: {list(response_data.keys())}")
-            
-            # Update the current note in session state
-            if "current_note" in st.session_state:
-                st.session_state["current_note"] = response_data
-                logger.info("Updated current note with translated content")
-            
-            # Refresh notes list
-            refresh_notes(token)
-            
-            # Set success flag
-            st.session_state["_translation_complete"] = True
-        else:
-            error_message = f"Translation failed with status code: {response.status_code}"
-            logger.error(error_message)
-            try:
-                error_detail = response.json()
-                logger.error(f"Error details: {error_detail}")
-            except:
-                error_detail = response.text[:100]
-                logger.error(f"Error response: {error_detail}")
-            
-            st.session_state["_translation_error"] = error_message
+            if response.status_code == 401:
+                # Token is invalid or expired
+                logger.error("Authentication failed during translation")
+                result["error"] = "Authentication failed. Please log in again."
+                # Clear token and redirect to login
+                if "token" in st.session_state:
+                    del st.session_state["token"]
+                if "user" in st.session_state:
+                    del st.session_state["user"]
+                st.session_state["show_login"] = True
+                return result
+                
+            if response.status_code == 200:
+                # Parse the response
+                response_data = response.json()
+                logger.info(f"Translation successful, received response with fields: {list(response_data.keys())}")
+                
+                # Return the updated note
+                result["note"] = response_data
+                result["success"] = True
+            else:
+                error_message = f"Translation failed with status code: {response.status_code}"
+                logger.error(error_message)
+                try:
+                    error_detail = response.json()
+                    logger.error(f"Error details: {error_detail}")
+                    result["error"] = error_detail.get("detail", error_message)
+                except:
+                    error_detail = response.text[:100]
+                    logger.error(f"Error response: {error_detail}")
+                    result["error"] = error_message
     except Exception as e:
         error_message = f"Error during translation: {str(e)}"
         logger.exception(error_message)
-        st.session_state["_translation_error"] = error_message
-    finally:
-        # Always clean up
-        st.session_state["_translation_in_progress"] = False
-        # Try to force refresh
-        try:
-            st.rerun()
-        except:
-            pass
+        result["error"] = error_message
+            
+    return result
 
-def refresh_notes(token):
-    """Helper function to refresh notes list."""
-    try:
-        # Define the actual refresh function
-        def _refresh_notes_task():
-            try:
-                api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
-                url = f"{api_base_url}/notes"
-                
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {token}" if not token.startswith("Bearer ") else token
-                }
-                
-                response = httpx.get(url, headers=headers, timeout=10.0)
-                
-                if response.status_code == 200:
-                    notes_data = response.json()
-                    st.session_state["notes"] = notes_data
-                    logger.info(f"Successfully refreshed notes list, fetched {len(notes_data)} notes")
-                else:
-                    logger.error(f"Failed to refresh notes: HTTP {response.status_code}")
-            except Exception as e:
-                logger.error(f"Error refreshing notes: {str(e)}")
+@check_auth
+async def refresh_notes_async(token: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Refresh the notes list.
+    
+    Args:
+        token: Authentication token
         
-        # Run in a separate thread to avoid blocking
-        refresh_thread = threading.Thread(target=_refresh_notes_task)
-        refresh_thread.daemon = True
-        refresh_thread.start()
+    Returns:
+        Dict containing notes or error
+    """
+    result = {
+        "success": False,
+        "notes": [],
+        "error": None
+    }
+    
+    try:
+        # Get API base URL from environment or use default
+        api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
+        
+        # Notes API endpoint
+        url = f"{api_base_url}/notes"
+        
+        # Set up headers with authorization
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}" if not token.startswith("Bearer ") else token
+        }
+        
+        logger.info(f"Refreshing notes from: {url}")
+        
+        # Make async request
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, headers=headers)
+            
+            if response.status_code == 401:
+                # Token is invalid or expired
+                logger.error("Authentication failed while refreshing notes")
+                result["error"] = "Authentication failed. Please log in again."
+                # Clear token and redirect to login
+                if "token" in st.session_state:
+                    del st.session_state["token"]
+                if "user" in st.session_state:
+                    del st.session_state["user"]
+                st.session_state["show_login"] = True
+                return result
+                
+            if response.status_code == 200:
+                # Parse the response
+                notes = response.json()
+                logger.info(f"Successfully fetched {len(notes)} notes")
+                
+                # Update result
+                result["notes"] = notes
+                result["success"] = True
+            else:
+                error_message = f"Failed to refresh notes with status code: {response.status_code}"
+                logger.error(error_message)
+                try:
+                    error_detail = response.json()
+                    logger.error(f"Error details: {error_detail}")
+                    result["error"] = error_detail.get("detail", error_message)
+                except:
+                    error_detail = response.text[:100]
+                    logger.error(f"Error response: {error_detail}")
+                    result["error"] = error_message
     except Exception as e:
-        logger.error(f"Error starting refresh thread: {str(e)}")
+        error_message = f"Error refreshing notes: {str(e)}"
+        logger.exception(error_message)
+        result["error"] = error_message
+            
+    return result
+
+def contains_russian(text: Optional[str]) -> bool:
+    """
+    Check if a text contains Russian characters.
+    
+    Args:
+        text: Text to check
+        
+    Returns:
+        bool: True if text contains Russian characters, False otherwise
+    """
+    if not text:
+        return False
+        
+    # Russian Unicode range: U+0400 to U+04FF
+    for char in text:
+        if 0x0400 <= ord(char) <= 0x04FF:
+            return True
+    return False
 
 def render_notes_list(notes: List[Dict[str, Any]]) -> None:
     """Render the list of notes."""
-    # Header with create button
-    col1, col2 = st.columns([3, 1])
+    # Header with button to create a new note
+    col1, col2 = st.columns([8, 2])
+    
     with col1:
-        st.markdown("## My Notes")
+        st.markdown("## Your Notes")
+    
     with col2:
-        if st.button("➕ New Note", key="create_new_note_btn", use_container_width=True):
+        if st.button("✏️ New Note", key="new_note_btn", use_container_width=True):
             st.session_state._create_note = True
             st.rerun()
     
-    # Display each note as a card
+    # If no notes, show message
     if not notes:
-        st.markdown(
-            """
-            <div style="text-align: center; margin-top: 50px; margin-bottom: 50px; padding: 30px; 
-                        border: 1px dashed var(--border-color); border-radius: 8px;">
-                <p style="margin-bottom: 20px;">No notes available. Create your first note to get started!</p>
-            </div>
-            """, 
-            unsafe_allow_html=True
-        )
+        st.info("You don't have any notes yet. Create one to get started!")
+        return
     
     # Display each note as a card
     for i, note in enumerate(notes):
@@ -284,7 +366,7 @@ def render_notes_list(notes: List[Dict[str, Any]]) -> None:
                     if st.button("🔄 Translate", key=f"translate_note_{i}", type="secondary", help="Translate Russian text to English"):
                         # Store the note to translate and set translation flag
                         st.session_state.current_note = note
-                        st.session_state._translate_note_requested = True
+                        st.session_state[STATE_KEYS["TRANSLATION"]["REQUESTED"]] = True
                         st.rerun()
             with col2:
                 if st.button("View", key=f"view_note_{i}", use_container_width=True):
@@ -292,112 +374,93 @@ def render_notes_list(notes: List[Dict[str, Any]]) -> None:
                     st.rerun()
             st.divider()
 
-
 def render_create_note_form() -> bool:
-    """Render the form for creating a new note.
+    """
+    Render the form for creating a new note.
     
     Returns:
-        bool: True if the form was submitted, False otherwise.
+        bool: True if a note was created, False otherwise
     """
-    st.markdown(
-        """
-        <div style="margin-bottom: 20px;">
-            <h2>Create New Note</h2>
-        </div>
-        """, 
-        unsafe_allow_html=True
-    )
+    st.markdown("## Create a New Note")
     
-    with st.form(key="create_note_form", clear_on_submit=False):
-        st.text_input("Title", key="note_title")
-        st.text_area("Content", key="note_content", height=300)
+    with st.form(key="create_note_form"):
+        title = st.text_input("Title", key="note_title")
+        content = st.text_area("Content", key="note_content", height=200)
         
-        col1, col2 = st.columns([1, 1])
+        col1, col2 = st.columns([1, 5])
         with col1:
-            submit = st.form_submit_button("Create Note", use_container_width=True)
-            if submit:
-                st.session_state._note_create_submitted = True
+            submitted = st.form_submit_button("Save", use_container_width=True)
         with col2:
-            cancel = st.form_submit_button("Cancel", use_container_width=True)
-            if cancel:
+            if st.form_submit_button("Cancel", use_container_width=True, type="secondary"):
                 st.session_state._create_note = False
                 st.rerun()
-    
-    # Return submission status            
-    return st.session_state.get("_note_create_submitted", False)
-
-
-def contains_russian(text: str) -> bool:
-    """Check if text contains Russian characters.
-    
-    Args:
-        text: Text to check
-        
-    Returns:
-        bool: True if text contains Russian characters, False otherwise
-    """
-    if not isinstance(text, str):
-        return False
-    
-    # Define set of Russian Cyrillic characters
-    russian_chars = set('абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
-                       'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ')
-    
-    # Check if any character in text is in the set of Russian characters
-    return any(char in russian_chars for char in text)
-
+                return False
+                
+    if submitted:
+        if not title or not content:
+            st.error("Please provide both title and content for your note.")
+            return False
+            
+        with st.spinner("Saving note..."):
+            success = notes_service.create_note(title, content)
+            
+        if success:
+            st.success("Note created successfully!")
+            st.session_state._create_note = False
+            
+            # Force refresh notes
+            notes = notes_service.get_notes()
+            if notes:
+                st.session_state.notes = notes
+                
+            st.rerun()
+            return True
+        else:
+            st.error("Failed to create note. Please try again.")
+            return False
+            
+    return False
 
 def render_note_detail(note: Dict[str, Any]) -> None:
-    """Render the detail view of a note.
-    
-    Args:
-        note: The note to display.
-    """
-    # Validate that note is a dictionary
-    if not isinstance(note, dict):
-        st.error("Invalid note data. Please go back to the notes list.")
-        if st.button("Back to Notes", key="back_from_invalid"):
-            st.session_state.current_note = None
-            st.rerun()
-        return
-    
+    """Render the detail view of a note."""
+    # Extract note data
     note_id = note.get("id")
     title = note.get("title", "Untitled")
     content = note.get("content", "")
     is_translated = note.get("is_translated", False)
     original_content = note.get("original_content", "")
     
-    # Show edit form if in edit mode
-    if st.session_state.get("edit_mode", False):
-        st.markdown(
-            """
-            <div style="margin-bottom: 20px;">
-                <h2>Edit Note</h2>
-            </div>
-            """, 
-            unsafe_allow_html=True
-        )
+    # Back button
+    if st.button("← Back to Notes", key="back_btn"):
+        st.session_state.current_note = None
         
-        with st.form(key="edit_note_form", clear_on_submit=False):
-            st.text_input("Title", key="edit_note_title", value=title)
-            st.text_area("Content", key="edit_note_content", value=content, height=300)
+        # Clear any translation state
+        for key in STATE_KEYS["PREVIEW"].values():
+            if key in st.session_state:
+                del st.session_state[key]
+                
+        st.rerun()
+    
+    # Show side by side view if requested
+    if st.session_state.get("_show_side_by_side", False):
+        st.markdown("## Side by Side Comparison")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### Original (Russian)")
+            st.markdown(original_content)
             
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                submit = st.form_submit_button("Save Changes", use_container_width=True)
-                if submit:
-                    st.session_state._edit_note_submitted = True
-            with col2:
-                cancel = st.form_submit_button("Cancel", use_container_width=True)
-                if cancel:
-                    st.session_state.edit_mode = False
-                    st.rerun()
+        with col2:
+            st.markdown("### Translated (English)")
+            st.markdown(content)
+            
+        if st.button("← Back to Note", key="back_to_note_btn"):
+            st.session_state._show_side_by_side = False
+            st.rerun()
     else:
         # Note detail view
         st.markdown(f"## {title}")
-        
-        # Check if translation is in progress
-        translation_in_progress = st.session_state.get("_translation_in_progress", False)
         
         # Handle translated content display
         if is_translated:
@@ -420,27 +483,7 @@ def render_note_detail(note: Dict[str, Any]) -> None:
             # Add a button to show side-by-side view
             if st.button("📊 Side-by-Side View", key="side_by_side_btn"):
                 st.session_state._show_side_by_side = True
-                
-            # Show side-by-side view if requested
-            if st.session_state.get("_show_side_by_side", False):
-                st.markdown("### Side-by-Side Comparison")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Original (Russian)**")
-                    st.markdown(f"{original_content}")
-                with col2:
-                    st.markdown("**Translated (English)**")
-                    st.markdown(f"{content}")
-                    
-                # Button to hide side-by-side view
-                if st.button("❌ Hide Side-by-Side View", key="hide_side_by_side_btn"):
-                    st.session_state._show_side_by_side = False
-                    st.rerun()
-        elif translation_in_progress:
-            # Show content with translation spinner
-            st.markdown(f"{content}")
-            with st.spinner("Translating... Please wait"):
-                st.info("Translation in progress. This may take a moment.")
+                st.rerun()
         else:
             # Show regular content if not translated
             st.markdown(f"{content}")
@@ -462,29 +505,30 @@ def render_note_detail(note: Dict[str, Any]) -> None:
                     with col1:
                         if st.button("🔄 Quick Translate", key="quick_translate_btn", help="Show a quick translation without saving"):
                             # Initialize translation state
-                            st.session_state["_show_live_translation"] = True
-                            st.session_state["_translation_preview_loading"] = True
-                            st.session_state["_translation_preview_result"] = None
-                            st.session_state["_translation_preview_error"] = None
+                            st.session_state[STATE_KEYS["PREVIEW"]["VISIBLE"]] = True
+                            st.session_state[STATE_KEYS["PREVIEW"]["LOADING"]] = True
+                            st.session_state[STATE_KEYS["PREVIEW"]["RESULT"]] = None
+                            st.session_state[STATE_KEYS["PREVIEW"]["ERROR"]] = None
                             
-                            # Start translation thread
-                            thread = threading.Thread(target=get_translation_thread)
-                            thread.daemon = True
-                            thread.start()
+                            st.rerun()
                     
                     with col2:
                         if st.button("💾 Translate & Save", key="translate_save_btn", help="Translate and save the note"):
-                            st.session_state["_translation_in_progress"] = True
-                            st.session_state["_translate_note_requested"] = True
+                            st.session_state[STATE_KEYS["TRANSLATION"]["IN_PROGRESS"]] = True
+                            st.session_state[STATE_KEYS["TRANSLATION"]["REQUESTED"]] = True
                             st.rerun()
                     
                     with col3:
                         if st.button("❌ Hide Options", key="hide_translation_options"):
                             st.session_state["_live_translation_visible"] = False
+                            # Clear any translation preview
+                            for key in STATE_KEYS["PREVIEW"].values():
+                                if key in st.session_state:
+                                    del st.session_state[key]
                             st.rerun()
                             
                     # Show translation popup if requested
-                    if st.session_state.get("_show_live_translation", False):
+                    if st.session_state.get(STATE_KEYS["PREVIEW"]["VISIBLE"], False):
                         # Create a container for the translation
                         with st.container():
                             st.markdown("""
@@ -497,14 +541,15 @@ def render_note_detail(note: Dict[str, Any]) -> None:
                             translation_placeholder = st.empty()
                             
                             # Check if we have an error
-                            if st.session_state.get("_translation_preview_error"):
-                                translation_placeholder.error(st.session_state["_translation_preview_error"])
-                                del st.session_state["_translation_preview_error"]
+                            if st.session_state.get(STATE_KEYS["PREVIEW"]["ERROR"]):
+                                translation_placeholder.error(st.session_state[STATE_KEYS["PREVIEW"]["ERROR"]])
+                                # Reset the error state
+                                del st.session_state[STATE_KEYS["PREVIEW"]["ERROR"]]
                             # Check if we have a result
-                            elif st.session_state.get("_translation_preview_result"):
-                                translation_placeholder.markdown(st.session_state["_translation_preview_result"])
-                            # Show loading state
-                            elif st.session_state.get("_translation_preview_loading", True):
+                            elif st.session_state.get(STATE_KEYS["PREVIEW"]["RESULT"]):
+                                translation_placeholder.markdown(st.session_state[STATE_KEYS["PREVIEW"]["RESULT"]])
+                            # Show loading state - will be replaced after async operation
+                            elif st.session_state.get(STATE_KEYS["PREVIEW"]["LOADING"], True):
                                 translation_placeholder.info("Loading translation...")
                             
                             st.markdown("""
@@ -514,57 +559,178 @@ def render_note_detail(note: Dict[str, Any]) -> None:
                             </div>
                             """, unsafe_allow_html=True)
                             
-                            # Button to hide translation
-                            if st.button("❌ Hide Translation", key="hide_live_translation"):
-                                st.session_state["_show_live_translation"] = False
-                                # Clean up the translation state
-                                for key in ["_translation_preview_result", "_translation_preview_loading", "_translation_preview_error"]:
-                                    if key in st.session_state:
-                                        del st.session_state[key]
-                                st.rerun()
+                            # If we're loading, trigger the async translation
+                            if st.session_state.get(STATE_KEYS["PREVIEW"]["LOADING"], False):
+                                # Clear the loading state
+                                st.session_state[STATE_KEYS["PREVIEW"]["LOADING"]] = False
+                                
+                                # Run the translation preview in the background
+                                st.cache_data(ttl=300)(get_translation_preview_wrapper)()
+                                
+def get_translation_preview_wrapper():
+    """Wrapper for async translation preview to use with st.cache_data."""
+    if "current_note" not in st.session_state:
+        return
         
-        # Action buttons in rows
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("📝 Edit", key="edit_btn", use_container_width=True):
-                st.session_state.edit_mode = True
-                # Reset any translation views when editing
-                if "_show_live_translation" in st.session_state:
-                    del st.session_state._show_live_translation
-                if "_show_side_by_side" in st.session_state:
-                    del st.session_state._show_side_by_side
-                if "_live_translation_visible" in st.session_state:
-                    del st.session_state._live_translation_visible
-                st.rerun()
+    note_id = st.session_state["current_note"].get("id")
+    if not note_id:
+        return
+    
+    try:
+        # Use synchronous API call instead of creating a new event loop
+        api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
+        token = st.session_state.get("token")
         
-        with col2:
-            if st.button("◀️ Back to Notes", key="back_btn", use_container_width=True):
-                st.session_state.current_note = None
-                # Clean up translation-related session state
-                if "_show_live_translation" in st.session_state:
-                    del st.session_state._show_live_translation
-                if "_show_side_by_side" in st.session_state:
-                    del st.session_state._show_side_by_side
-                st.rerun()
-        
-        # Delete button
-        if st.button("🗑️ Delete", key="delete_btn", use_container_width=True):
-            st.session_state._confirm_delete = True
-        
-        # Delete confirmation dialog
-        if st.session_state.get("_confirm_delete", False):
-            st.warning("Are you sure you want to delete this note? This action cannot be undone.")
+        if not token:
+            st.session_state[STATE_KEYS["PREVIEW"]["ERROR"]] = "Authentication required. Please log in."
+            return
             
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                if st.button("Yes, delete it", key="btn_confirm_delete", use_container_width=True):
-                    st.session_state._delete_note_confirmed = True
-                    st.session_state._confirm_delete = False
-            with col2:
-                if st.button("Cancel", key="btn_cancel_delete", use_container_width=True):
-                    st.session_state._confirm_delete = False
-                    st.rerun()
+        # Set up headers with authorization
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}" if not token.startswith("Bearer ") else token
+        }
+        
+        # Use the correct endpoint with preview parameter
+        url = f"{api_base_url}/notes/{note_id}/translate?preview=true"
+        logger.info(f"Making translation preview request to: {url}")
+        
+        # Make synchronous request instead of async
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(url, headers=headers)
+            
+            if response.status_code == 401:
+                # Token is invalid or expired
+                logger.error("Authentication failed during translation preview")
+                st.session_state[STATE_KEYS["PREVIEW"]["ERROR"]] = "Authentication failed. Please log in again."
+                
+                # Clear token and redirect to login
+                if "token" in st.session_state:
+                    del st.session_state["token"]
+                if "user" in st.session_state:
+                    del st.session_state["user"]
+                st.session_state["show_login"] = True
+                return
+                
+            if response.status_code == 200:
+                # Parse the response
+                response_data = response.json()
+                logger.info(f"Translation preview successful, received response with fields: {list(response_data.keys())}")
+                
+                # The translated text is in the content field of the note object
+                if "content" in response_data:
+                    st.session_state[STATE_KEYS["PREVIEW"]["RESULT"]] = response_data["content"]
+                    logger.info("Successfully extracted translated content from response")
+                # For backwards compatibility, also check for translated_text field
+                elif "translated_text" in response_data:
+                    st.session_state[STATE_KEYS["PREVIEW"]["RESULT"]] = response_data["translated_text"]
+                    logger.info("Using translated_text field from response")
+                else:
+                    logger.error(f"Translation preview response missing content field. Available fields: {list(response_data.keys())}")
+                    st.session_state[STATE_KEYS["PREVIEW"]["ERROR"]] = "Could not find translated text in response"
+            else:
+                error_message = f"Translation preview failed with status code: {response.status_code}"
+                logger.error(error_message)
+                try:
+                    error_detail = response.json()
+                    logger.error(f"Error details: {error_detail}")
+                    st.session_state[STATE_KEYS["PREVIEW"]["ERROR"]] = error_detail.get("detail", error_message)
+                except:
+                    error_detail = response.text[:100]
+                    logger.error(f"Error response: {error_detail}")
+                    st.session_state[STATE_KEYS["PREVIEW"]["ERROR"]] = error_message
+            
+        # Rerun to update UI
+        st.rerun()
+    except Exception as e:
+        st.session_state[STATE_KEYS["PREVIEW"]["ERROR"]] = f"Translation preview failed: {str(e)}"
+        st.rerun()
 
+def translate_note_wrapper():
+    """Wrapper for translation to use with st.cache_data."""
+    if "current_note" not in st.session_state:
+        return
+        
+    note_id = st.session_state["current_note"].get("id")
+    if not note_id:
+        return
+        
+    try:
+        # Use synchronous API call instead of creating a new event loop
+        api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
+        token = st.session_state.get("token")
+        
+        if not token:
+            st.session_state[STATE_KEYS["TRANSLATION"]["ERROR"]] = "Authentication required. Please log in."
+            st.session_state[STATE_KEYS["TRANSLATION"]["IN_PROGRESS"]] = False
+            return
+            
+        # Set up headers with authorization
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}" if not token.startswith("Bearer ") else token
+        }
+        
+        # Call translation endpoint (without preview param for full translation)
+        url = f"{api_base_url}/notes/{note_id}/translate"
+        logger.info(f"Making full translation request to: {url}")
+        
+        # Make synchronous request instead of async
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(url, headers=headers)
+            
+            if response.status_code == 401:
+                # Token is invalid or expired
+                logger.error("Authentication failed during translation")
+                st.session_state[STATE_KEYS["TRANSLATION"]["ERROR"]] = "Authentication failed. Please log in again."
+                
+                # Clear token and redirect to login
+                if "token" in st.session_state:
+                    del st.session_state["token"]
+                if "user" in st.session_state:
+                    del st.session_state["user"]
+                st.session_state["show_login"] = True
+                st.session_state[STATE_KEYS["TRANSLATION"]["IN_PROGRESS"]] = False
+                return
+                
+            if response.status_code == 200:
+                # Parse the response - expect a complete note object
+                response_data = response.json()
+                logger.info(f"Translation successful, received response with fields: {list(response_data.keys())}")
+                
+                # Update current note with the fully translated note
+                if "id" in response_data and "content" in response_data:
+                    st.session_state["current_note"] = response_data
+                    logger.info(f"Successfully updated note with translated content")
+                    
+                    # Refresh notes list using synchronous request
+                    notes_url = f"{api_base_url}/notes"
+                    notes_response = client.get(notes_url, headers=headers)
+                    if notes_response.status_code == 200:
+                        st.session_state["notes"] = notes_response.json()
+                    
+                    # Set success flag
+                    st.session_state[STATE_KEYS["TRANSLATION"]["COMPLETE"]] = True
+                else:
+                    logger.error(f"Translation response missing expected fields. Available fields: {list(response_data.keys())}")
+                    st.session_state[STATE_KEYS["TRANSLATION"]["ERROR"]] = "Incomplete translation data received"
+            else:
+                error_message = f"Translation failed with status code: {response.status_code}"
+                logger.error(error_message)
+                try:
+                    error_detail = response.json()
+                    logger.error(f"Error details: {error_detail}")
+                    st.session_state[STATE_KEYS["TRANSLATION"]["ERROR"]] = error_detail.get("detail", error_message)
+                except:
+                    error_detail = response.text[:100]
+                    logger.error(f"Error response: {error_detail}")
+                    st.session_state[STATE_KEYS["TRANSLATION"]["ERROR"]] = error_message
+    except Exception as e:
+        st.session_state[STATE_KEYS["TRANSLATION"]["ERROR"]] = f"Translation failed: {str(e)}"
+    finally:
+        # Clear flag
+        st.session_state[STATE_KEYS["TRANSLATION"]["IN_PROGRESS"]] = False
+        st.rerun()
 
 def render_notes_view() -> None:
     """
@@ -574,50 +740,52 @@ def render_notes_view() -> None:
     1. Handles translation requests if present
     2. Renders the appropriate view (note detail or notes list)
     """
+    # Check if user is authenticated
+    if "token" not in st.session_state:
+        st.warning("Please log in to view your notes")
+        st.session_state["show_login"] = True
+        return
+        
     # Get notes from state
     notes = st.session_state.get("notes", [])
+    
+    # Make sure notes is actually a list, not a coroutine
+    if not isinstance(notes, list):
+        # If it's not a list, use an empty list instead to avoid errors
+        logger.error(f"Expected notes to be a list, got {type(notes)} instead")
+        notes = []
     
     # Check if a note is being created
     creating_note = st.session_state.get("_create_note", False)
     
     # Check if translation is requested for saving
-    if st.session_state.get("_translate_note_requested", False) and st.session_state.get("current_note"):
-        note_id = st.session_state["current_note"].get("id")
-        if note_id:
-            # Set translation in progress flag
-            st.session_state["_translation_in_progress"] = True
-            
-            # Start translation in a thread only if not already in progress
-            if not st.session_state.get("_translation_thread_running", False):
-                st.session_state["_translation_thread_running"] = True
-                threading.Thread(target=translate_task).start()
+    if st.session_state.get(STATE_KEYS["TRANSLATION"]["REQUESTED"], False) and st.session_state.get("current_note"):
+        # Set translation in progress flag
+        st.session_state[STATE_KEYS["TRANSLATION"]["IN_PROGRESS"]] = True
         
         # Reset the translation request flag
-        st.session_state["_translate_note_requested"] = False
+        st.session_state[STATE_KEYS["TRANSLATION"]["REQUESTED"]] = False
+        
+        # Run the translation in the background
+        st.cache_data(ttl=300)(translate_note_wrapper)()
     
     # Handle translation completion
-    if st.session_state.get("_translation_complete", False):
+    if st.session_state.get(STATE_KEYS["TRANSLATION"]["COMPLETE"], False):
         st.success("Translation completed successfully!")
-        st.session_state["_translation_complete"] = False
-        st.session_state["_translation_thread_running"] = False
+        st.session_state[STATE_KEYS["TRANSLATION"]["COMPLETE"]] = False
     
     # Handle translation errors
-    if st.session_state.get("_translation_error", None):
-        error_msg = st.session_state["_translation_error"]
+    if st.session_state.get(STATE_KEYS["TRANSLATION"]["ERROR"], None):
+        error_msg = st.session_state[STATE_KEYS["TRANSLATION"]["ERROR"]]
         st.error(error_msg)
-        del st.session_state["_translation_error"]
-        st.session_state["_translation_thread_running"] = False
-            
+        del st.session_state[STATE_KEYS["TRANSLATION"]["ERROR"]]
+    
     # Render the appropriate view
-    if st.session_state.get("current_note"):
-        # Render note detail view
+    if creating_note:
+        render_create_note_form()
+    elif "current_note" in st.session_state and st.session_state["current_note"]:
+        # Show detail view
         render_note_detail(st.session_state["current_note"])
-    elif creating_note:
-        # Render create note form
-        submitted = render_create_note_form()
-        if submitted:
-            # Reset the create note flag if form was submitted
-            st.session_state["_create_note"] = False
     else:
-        # Render notes list
+        # Show notes list
         render_notes_list(notes) 

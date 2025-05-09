@@ -6,7 +6,7 @@ This module configures and runs the FastAPI application.
 import time
 from typing import Any, Dict
 
-from fastapi import Depends, FastAPI, Request, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import text

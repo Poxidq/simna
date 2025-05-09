@@ -4,8 +4,9 @@ Form validators.
 This module provides functions for validating form inputs.
 """
 import re
+from typing import Any, Optional, Tuple, Union
+
 import streamlit as st
-from typing import Optional, Union, Tuple, Any
 
 
 def validate_note_form(title: str, content: str) -> bool:

@@ -4,12 +4,13 @@ Tests for message translation functionality.
 This module contains end-to-end tests for translating different types of messages
 using the RapidAPI translation service.
 """
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi import HTTPException, status
 
-from backend.app.core.config import settings
 import backend.app.services.translation as translation_service  # Import the module instead of the function directly
+from backend.app.core.config import settings
 from backend.app.services.translation import translate_text
 
 

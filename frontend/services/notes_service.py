@@ -3,10 +3,11 @@ Notes service.
 
 This module provides functions for note operations.
 """
-import os
 import logging
+import os
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
+
 import streamlit as st
-from typing import Dict, List, Any, Optional, Union, Tuple, cast
 
 from frontend.services.api import api_request
 
@@ -18,17 +19,17 @@ logger = logging.getLogger("notes_service")
 DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
 
 
-async def get_notes() -> bool:
+async def get_notes() -> List[Dict[str, Any]]:
     """
     Get all notes for the current user.
     
     Returns:
-        bool: Success status
+        List[Dict[str, Any]]: List of notes or empty list if error
     """
     # Get auth token from session_state
     if "token" not in st.session_state:
         st.error("Authentication token is missing")
-        return False
+        return []
     
     token: str = st.session_state.token
     
@@ -39,27 +40,27 @@ async def get_notes() -> bool:
         if response:
             # Verify that the response is a list before assigning
             if isinstance(response, list):
+                # Store notes in session state
                 st.session_state.notes = response
                 # Debug info
                 if DEBUG_MODE:
                     logging.debug(f"Loaded {len(response)} notes")
-                return True
+                return response
             else:
                 # Handle case where response isn't a list as expected
-                # st.error("Unexpected response format from API")
                 if DEBUG_MODE:
                     logging.error(f"Expected list response, got: {type(response)}")
-                return False
+                return []
         else:
             # st.error("Failed to fetch notes")
             if DEBUG_MODE:
                 logging.error("Error fetching notes: No data returned")
-            return False
+            return []
     except Exception as e:
         # st.error(f"Error fetching notes: {str(e)}")
         if DEBUG_MODE:
             logging.exception("Error in get_notes")
-        return False
+        return []
 
 
 async def get_note(note_id: int) -> Optional[Dict[str, Any]]:
@@ -151,8 +152,10 @@ async def create_note(title: str, content: str) -> bool:
         
         if response:
             # Refresh notes list
-            await get_notes()
-            # st.success("Note created successfully!")
+            notes = await get_notes()
+            # Set the notes in session state
+            st.session_state.notes = notes
+            
             # Debug info
             if DEBUG_MODE:
                 logging.debug(f"Created note: {response}")
@@ -203,22 +206,21 @@ async def update_note(note_id: int, title: Optional[str], content: Optional[str]
         )
         
         if response:
-            # Refresh notes list
-            await get_notes()
-            
-            # Update current note if it's the one being edited
+            # Update the current note if it's the one being edited
             if "current_note" in st.session_state and st.session_state.current_note and st.session_state.current_note.get("id") == note_id:
                 st.session_state.current_note = response
-                
-            st.success("Note updated successfully!")
+            
+            # Refresh notes list
+            notes = await get_notes()
+            # Set the notes in session state
+            st.session_state.notes = notes
             
             # Debug info
             if DEBUG_MODE:
                 logging.debug(f"Updated note: {response}")
-                
             return True
         else:
-            st.error("Failed to update note")
+            # st.error("Failed to update note")
             if DEBUG_MODE:
                 logging.error("Error updating note: No data returned")
             return False
@@ -247,26 +249,22 @@ async def delete_note(note_id: int) -> bool:
     token: str = st.session_state.token
     
     try:
-        # Make the DELETE request
-        response = await api_request(
-            "DELETE", 
-            f"/notes/{note_id}", 
-            token=token
-        )
+        # Use DELETE method to delete the note
+        response = await api_request("DELETE", f"/notes/{note_id}", token=token)
         
-        # For DELETE requests, a 204 response will return None
-        # which is a successful deletion (not an error)
+        # Refresh notes list
+        notes = await get_notes()
+        # Set the notes in session state
+        st.session_state.notes = notes
+        
         # Clear current note if it's the one being deleted
         if "current_note" in st.session_state and st.session_state.current_note and st.session_state.current_note.get("id") == note_id:
             st.session_state.current_note = None
-            
-        # Refresh notes list
-        await get_notes()
         
         # Debug info
         if DEBUG_MODE:
-            logging.debug(f"Deleted note ID: {note_id}")
-            
+            logging.debug(f"Deleted note: {note_id}")
+        
         # Always return success since HTTPStatusError would be caught if the deletion failed
         return True
     except Exception as e:
@@ -277,56 +275,53 @@ async def delete_note(note_id: int) -> bool:
 
 
 async def get_translation_preview(note_id: int):
-    """Get a preview of the translated note content without saving to database.
+    """
+    Get a translation preview for a note.
     
     Args:
-        note_id: The ID of the note to translate
-    
+        note_id: ID of the note to translate
+        
     Returns:
-        tuple: (success, translation) where translation is the translated text or error message
+        Dict containing translation result or None if error
     """
-    # Check if token is in session state
+    # Get auth token from session_state
     if "token" not in st.session_state:
-        logger.warning("Translation preview attempted without auth token")
-        return False, "Authentication required"
+        if DEBUG_MODE:
+            logging.debug("Cannot translate: No authentication token available")
+        return None
     
-    token = st.session_state.token
+    token: str = st.session_state.token
     
     try:
-        logger.info(f"Requesting translation preview for note_id={note_id}")
-        
-        # Use preview query parameter in request
+        # Use the correct endpoint with preview parameter
         response = await api_request(
-            f"/notes/{note_id}/translate",
-            method="POST",
-            token=token,
-            params={"preview": "true"}
+            "POST", 
+            f"/notes/{note_id}/translate", 
+            params={"preview": "true"},
+            token=token
         )
         
         if response and "translated_text" in response:
-            # Log a truncated version of the translation for debugging
-            preview_text = response["translated_text"][:50] + "..." if len(response["translated_text"]) > 50 else response["translated_text"]
-            logger.debug(f"Translation preview response received: {preview_text}")
-            return True, response["translated_text"]
-        elif response:
-            logger.error(f"Translation preview response missing translated_text: {response}")
-            return False, "Error: Invalid response format"
+            if DEBUG_MODE:
+                logging.debug(f"Translation preview successful")
+            return response
         else:
-            logger.error("No response received for translation preview")
-            return False, "Error: No response from server"
-            
+            if DEBUG_MODE:
+                logging.error(f"Translation preview failed: {response}")
+            return None
     except Exception as e:
-        logger.exception(f"Error getting translation preview: {str(e)}")
-        return False, f"Error: {str(e)}"
+        if DEBUG_MODE:
+            logging.exception(f"Error in get_translation_preview: {str(e)}")
+        return None
 
 
 async def translate_note(note_id: int) -> bool:
     """
-    Translate a note.
-
+    Translate a note and save the result.
+    
     Args:
-        note_id: Note ID
-
+        note_id: ID of the note to translate
+        
     Returns:
         bool: Success status
     """
@@ -338,34 +333,31 @@ async def translate_note(note_id: int) -> bool:
     token: str = st.session_state.token
     
     try:
-        response: Optional[Dict[str, Any]] = await api_request(
+        # Use POST to translate the note - no preview param for full translation
+        response = await api_request(
             "POST", 
-            f"/notes/{note_id}/translate", 
+            f"/notes/{note_id}/translate",
             token=token
         )
         
         if response:
-            # Refresh notes list
-            await get_notes()
-            
-            # Update current note if it's the one being translated
+            # Update the current note if it's the one being translated
             if "current_note" in st.session_state and st.session_state.current_note and st.session_state.current_note.get("id") == note_id:
                 st.session_state.current_note = response
                 
-            st.success("Note translated successfully!")
+            # Refresh notes list
+            notes = await get_notes()
+            # Update notes in session state
+            st.session_state.notes = notes
             
-            # Debug info
             if DEBUG_MODE:
-                logging.debug(f"Translated note: {response}")
-                
+                logging.debug(f"Translation successful: {response}")
             return True
         else:
-            st.error("Failed to translate note")
             if DEBUG_MODE:
-                logging.error("Error translating note: No data returned")
+                logging.error("Translation failed: No data returned")
             return False
     except Exception as e:
-        st.error(f"Error translating note: {str(e)}")
         if DEBUG_MODE:
-            logging.exception("Error in translate_note")
+            logging.exception(f"Error in translate_note: {str(e)}")
         return False 

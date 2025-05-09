@@ -6,7 +6,8 @@ Run with: locust -f backend/app/tests/performance_test.py
 """
 import json
 import random
-from locust import HttpUser, task, between
+
+from locust import HttpUser, between, task
 
 
 class NotesAppUser(HttpUser):
