@@ -8,6 +8,8 @@ import logging
 import streamlit as st
 import datetime as dt
 import jwt
+import secrets
+import sys
 from typing import Dict, Tuple, Any, Optional, Union, List, cast, TypeVar, Callable
 from frontend.services.api import api_request
 
@@ -19,10 +21,61 @@ logger = logging.getLogger("auth_service")
 # Debug mode setting
 DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
 
+# Check if in production environment
+IS_PRODUCTION = os.getenv("ENVIRONMENT", "development").lower() == "production"
+
+# Load secrets from streamlit secrets.toml if available
+def get_secret(key: str, default: Any = None) -> Any:
+    """Get a secret from Streamlit's secrets or environment variables."""
+    try:
+        return st.secrets[key]
+    except (KeyError, AttributeError):
+        return os.getenv(key, default)
+
+# Generate a secure random key for cookie encryption
+def generate_secure_key(length: int = 32) -> str:
+    """Generate a cryptographically secure random key of specified length."""
+    return secrets.token_hex(length)
+
 # Cookie settings
 COOKIE_NAME = "notes_app_auth"
-COOKIE_KEY = os.getenv("COOKIE_KEY", "notes_app_cookie_key")
-COOKIE_EXPIRY_DAYS = 30
+DEFAULT_KEY = "notes_app_cookie_key"
+# Get cookie key from secrets or environment
+COOKIE_KEY_FROM_CONFIG = get_secret("cookie_key", os.getenv("COOKIE_KEY"))
+
+# Check if we need to generate a key or stop execution in production
+if IS_PRODUCTION:
+    if not COOKIE_KEY_FROM_CONFIG or COOKIE_KEY_FROM_CONFIG == DEFAULT_KEY:
+        # In production, either generate a secure key or stop execution
+        if get_secret("allow_generate_cookie_key", "False").lower() == "true":
+            # Generate a secure random key
+            COOKIE_KEY = generate_secure_key()
+            logger.warning("SECURITY WARNING: Generated a random cookie key for this session. "
+                           "Consider setting a permanent key in your secrets.toml file or environment variables.")
+        else:
+            # Stop execution with an error message
+            error_msg = (
+                "\n\n🔐 SECURITY ERROR: No secure cookie key provided in production.\n"
+                "Please set a strong, unique cookie key using one of the following methods:\n"
+                "1. Add 'cookie_key = \"your-secure-key\"' to .streamlit/secrets.toml\n"
+                "2. Set the COOKIE_KEY environment variable\n"
+                "3. Set 'allow_generate_cookie_key = true' in secrets.toml to auto-generate a key (not recommended)\n\n"
+                "A strong key should be at least 32 characters long and not be the default value.\n"
+            )
+            logger.error(error_msg)
+            st.error(error_msg)
+            sys.exit(1)
+    else:
+        # Use the provided key
+        COOKIE_KEY = COOKIE_KEY_FROM_CONFIG
+else:
+    # In development, use the configured key or default with a warning
+    COOKIE_KEY = COOKIE_KEY_FROM_CONFIG or DEFAULT_KEY
+    if COOKIE_KEY == DEFAULT_KEY:
+        logger.warning("Using default cookie key in development. This is not secure for production.")
+
+COOKIE_EXPIRY_DAYS = int(get_secret("cookie_expiry_days", os.getenv("COOKIE_EXPIRY_DAYS", "30")))
+JWT_ALGORITHM = get_secret("jwt_algorithm", "HS256")
 
 
 def token_encode(token: str, exp_date: dt.datetime, user_info: Dict[str, Any]) -> str:
@@ -38,60 +91,173 @@ def token_encode(token: str, exp_date: dt.datetime, user_info: Dict[str, Any]) -
     Returns:
         str: The encoded JWT cookie string for reauthentication
     """
+    # Include current page state in the token if available
+    view_state = {}
+    if "current_note" in st.session_state and st.session_state.current_note:
+        # If viewing a note, store its ID
+        if isinstance(st.session_state.current_note, dict) and "id" in st.session_state.current_note:
+            view_state["current_note_id"] = st.session_state.current_note["id"]
+    
+    if "show_create_note" in st.session_state:
+        view_state["show_create_note"] = st.session_state.show_create_note
+        
     return jwt.encode(
         {
             "token": token,
             "name": user_info.get("username", ""),
             "user_id": user_info.get("id", ""),
+            "email": user_info.get("email", ""),
             "exp_date": exp_date.timestamp(),
+            "view_state": view_state  # Add view state to token
         },
         COOKIE_KEY,
-        algorithm="HS256",
+        algorithm=JWT_ALGORITHM,
     )
 
 
 def cookie_is_valid(cookie_manager) -> bool:
     """
-    Check if the reauthentication cookie is valid and, if it is, update the session state.
+    Check if the authentication cookie is valid.
     
     Args:
-        cookie_manager: A cookie manager instance
+        cookie_manager: The cookie manager instance
         
     Returns:
-        bool: True if the cookie is valid and the session state is updated successfully
+        bool: True if the cookie is valid, False otherwise
     """
     try:
-        token_data = cookie_manager.get(COOKIE_NAME)
-        if token_data is None:
+        # Get the cookie value
+        cookies = cookie_manager.get_all(key="cookie_validation")
+        if COOKIE_NAME not in cookies:
             if DEBUG_MODE:
                 logging.debug("No auth cookie found")
             return False
+            
+        token_data = cookies[COOKIE_NAME]
+        if not token_data:
+            if DEBUG_MODE:
+                logging.debug("Empty auth cookie")
+            return False
         
-        # Decode the JWT
-        token_info = jwt.decode(token_data, COOKIE_KEY, algorithms=["HS256"])
+        # Decode the JWT - handle all possible JWT errors explicitly
+        try:
+            token_info = jwt.decode(token_data, COOKIE_KEY, algorithms=[JWT_ALGORITHM])
+            
+            if DEBUG_MODE:
+                logging.debug(f"Successfully decoded JWT token from cookie")
+                if "exp_date" in token_info:
+                    exp_time = dt.datetime.fromtimestamp(token_info["exp_date"]).strftime('%Y-%m-%d %H:%M:%S')
+                    logging.debug(f"Token expiration date: {exp_time}")
+                
+        except jwt.ExpiredSignatureError:
+            if DEBUG_MODE:
+                logging.debug("JWT token has expired")
+            # Delete the expired cookie
+            try:
+                cookie_manager.delete(COOKIE_NAME)
+                if DEBUG_MODE:
+                    logging.debug("Deleted expired cookie")
+            except Exception as e:
+                if DEBUG_MODE:
+                    logging.debug(f"Failed to delete expired cookie: {str(e)}")
+            return False
+        except jwt.InvalidTokenError as e:
+            if DEBUG_MODE:
+                logging.debug(f"Invalid JWT token format: {str(e)}")
+            try:
+                cookie_manager.delete(COOKIE_NAME)
+                if DEBUG_MODE:
+                    logging.debug("Deleted invalid cookie")
+            except Exception as delete_e:
+                if DEBUG_MODE:
+                    logging.debug(f"Failed to delete invalid cookie: {str(delete_e)}")
+            return False
+        except jwt.PyJWTError as e:
+            if DEBUG_MODE:
+                logging.debug(f"PyJWT error while decoding token: {str(e)}")
+            try:
+                cookie_manager.delete(COOKIE_NAME)
+                if DEBUG_MODE:
+                    logging.debug("Deleted invalid cookie")
+            except Exception as delete_e:
+                if DEBUG_MODE:
+                    logging.debug(f"Failed to delete invalid cookie: {str(delete_e)}")
+            return False
+        except Exception as e:
+            if DEBUG_MODE:
+                logging.debug(f"Unexpected error decoding JWT: {str(e)}")
+            return False
+        
+        # Check required token fields
+        required_fields = ["token", "exp_date", "name", "user_id"]
+        missing_fields = [field for field in required_fields if field not in token_info]
+        
+        if missing_fields:
+            if DEBUG_MODE:
+                logging.debug(f"JWT missing required fields: {', '.join(missing_fields)}")
+            return False
         
         # Check expiration
-        if token_info["exp_date"] < dt.datetime.now(dt.UTC).timestamp():
+        current_time = dt.datetime.now(dt.UTC).timestamp()
+        if token_info["exp_date"] < current_time:
             if DEBUG_MODE:
-                logging.debug("Auth cookie expired")
+                logging.debug(f"JWT expired: {token_info['exp_date']} < {current_time}")
+                exp_time = dt.datetime.fromtimestamp(token_info["exp_date"]).strftime('%Y-%m-%d %H:%M:%S')
+                now_time = dt.datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M:%S')
+                logging.debug(f"Expired at {exp_time}, current time: {now_time}")
+            
+            # Delete the expired cookie
+            try:
+                cookie_manager.delete(COOKIE_NAME)
+                if DEBUG_MODE:
+                    logging.debug("Deleted expired cookie")
+            except Exception as e:
+                if DEBUG_MODE:
+                    logging.debug(f"Failed to delete expired cookie: {str(e)}")
             return False
-        
-        # Update session state
+            
+        # Set token in session state
         st.session_state.token = token_info["token"]
         
-        # Attempt to validate the token with a backend call
-        success, _ = get_current_user()
-        if success:
+        # Store basic user info in session state
+        if "user" not in st.session_state:
+            st.session_state.user = {
+                "id": token_info.get("user_id"),
+                "username": token_info.get("name"),
+                "email": token_info.get("email")
+            }
+        
+        # When a valid cookie is found, ensure authentication UI state is correct
+        # This guarantees the user won't see login/register forms
+        st.session_state.show_login = False
+        st.session_state.show_register = False
+        
+        # Restore view state if available
+        if "view_state" in token_info and isinstance(token_info["view_state"], dict):
+            view_state = token_info["view_state"]
+            
+            # Restore create note view if that's where they were
+            if "show_create_note" in view_state:
+                st.session_state.show_create_note = view_state["show_create_note"]
+                
+            # Restore current note if they were viewing one
+            if "current_note_id" in view_state and view_state["current_note_id"]:
+                # We'll need to fetch the note data on the next page load
+                # Just marking that we need to restore this note
+                st.session_state._restore_note_id = view_state["current_note_id"]
+                
             if DEBUG_MODE:
-                logging.debug("Successfully authenticated via cookie")
-            return True
-        else:
-            if DEBUG_MODE:
-                logging.debug("Cookie token is invalid on backend")
-            return False
+                logging.debug(f"Restored view state from cookie: {view_state}")
+                
+        if DEBUG_MODE:
+            logging.debug(f"Successfully restored session from cookie for user: {token_info.get('name', 'unknown')}")
+        
+        return True
     except Exception as e:
         if DEBUG_MODE:
-            logging.debug(f"Cookie validation error: {str(e)}")
+            logging.exception(f"Unexpected cookie validation error: {str(e)}")
+        # Be conservative - don't delete the cookie on unexpected errors
+        # It might still be valid and the error could be transient
         return False
 
 
@@ -134,10 +300,14 @@ async def login(username: str, password: str) -> Tuple[bool, Optional[str]]:
                     # If login was successful, store the token in a cookie for persistent login
                     if "cookie_manager" in st.session_state:
                         try:
+                            # Set expiration date for the cookie
                             exp_date = dt.datetime.now(dt.UTC) + dt.timedelta(days=COOKIE_EXPIRY_DAYS)
                             user_info = st.session_state.get("user", {})
+                            
+                            # Create JWT for the cookie
                             cookie_token = token_encode(token, exp_date, user_info)
                             
+                            # Set the cookie with the JWT
                             st.session_state.cookie_manager.set(
                                 COOKIE_NAME,
                                 cookie_token,
@@ -244,11 +414,33 @@ async def get_current_user() -> Tuple[bool, Optional[str]]:
         
         if response and "email" in response:
             st.session_state.user = response
+            
+            # Update cookie with latest user info if we have a cookie manager
+            if "cookie_manager" in st.session_state and COOKIE_NAME in st.session_state.cookie_manager.get_all(key="update_cookie"):
+                try:
+                    exp_date = dt.datetime.now(dt.UTC) + dt.timedelta(days=COOKIE_EXPIRY_DAYS)
+                    cookie_token = token_encode(token, exp_date, response)
+                    st.session_state.cookie_manager.set(
+                        COOKIE_NAME,
+                        cookie_token,
+                        expires_at=exp_date
+                    )
+                except Exception as e:
+                    if DEBUG_MODE:
+                        logging.error(f"Failed to update auth cookie: {str(e)}")
+            
             return True, None
         else:
             if DEBUG_MODE:
                 logging.debug(f"Failed to get user details. Response: {response}")
             
+            # If we got a response but it's not what we expected, the token might be invalid
+            # Clear token and cookie
+            if "token" in st.session_state:
+                del st.session_state.token
+            if "user" in st.session_state:
+                del st.session_state.user
+                
             # Clear cookie if it exists since token is invalid
             if "cookie_manager" in st.session_state:
                 try:
@@ -301,6 +493,8 @@ def logout() -> None:
         del st.session_state.token
     if "user" in st.session_state:
         del st.session_state.user
+    if "auth_checked" in st.session_state:
+        del st.session_state.auth_checked
     
     # Delete the authentication cookie if it exists
     if "cookie_manager" in st.session_state:

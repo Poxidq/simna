@@ -197,6 +197,7 @@ async def delete_note(
 @router.post("/{note_id}/translate", response_model=NoteResponse)
 async def translate_note(
     note_id: int,
+    preview: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ) -> Any:
@@ -205,6 +206,7 @@ async def translate_note(
 
     Args:
         note_id: ID of the note to translate
+        preview: If True, returns translation without saving to database
         db: Database session
         current_user: Current authenticated user
 
@@ -214,24 +216,48 @@ async def translate_note(
     Raises:
         HTTPException: If note not found or not owned by user
     """
+    # Add logging for translation requests
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Translation request received for note: {note_id} by user: {current_user.id}, preview: {preview}")
+    
     db_note = db.query(Note).filter(
         Note.id == note_id, 
         Note.user_id == current_user.id
     ).first()
     
     if db_note is None:
+        logger.warning(f"Note not found: {note_id} for user: {current_user.id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Note not found"
         )
     
-    # Only translate if not already translated
+    # Cast to string to satisfy mypy
+    note_content = cast(str, db_note.content)
+    
+    # Get the translation result
+    logger.debug(f"Requesting translation for note: {note_id}, content length: {len(note_content)}")
+    translation_result = await translate_text(note_content)
+    logger.debug(f"Translation complete for note: {note_id}, result length: {len(translation_result['translated_text'])}")
+    
+    # If preview mode, just return the translated text without saving
+    if preview:
+        logger.info(f"Returning translation preview for note: {note_id}")
+        # Create a copy of the note with translated content
+        from copy import deepcopy
+        response_note = deepcopy(db_note.__dict__)
+        if "_sa_instance_state" in response_note:
+            del response_note["_sa_instance_state"]
+            
+        # Add translation details
+        response_note["translated_text"] = translation_result["translated_text"]
+        response_note["is_preview"] = True
+        return response_note
+    
+    # Only update database if not already translated and not in preview mode
     if not db_note.is_translated:
-        # Cast to string to satisfy mypy
-        note_content = cast(str, db_note.content)
-        # Translate the note content
-        translation_result = await translate_text(note_content)
-        
+        logger.info(f"Saving translation for note: {note_id}")
         with atomic_transaction(db) as tx:
             # Store original content and use setattr to work around type issues
             setattr(db_note, "original_content", db_note.content)
@@ -240,5 +266,7 @@ async def translate_note(
             
             tx.commit()
             tx.refresh(db_note)
+    else:
+        logger.info(f"Note: {note_id} was already translated, not updating database")
     
     return db_note 

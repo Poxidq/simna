@@ -74,12 +74,22 @@ async def get_note(note_id: int) -> Optional[Dict[str, Any]]:
     """
     # Get auth token from session_state
     if "token" not in st.session_state:
-        st.error("Authentication token is missing")
+        if DEBUG_MODE:
+            logging.debug("Cannot get note: No authentication token available")
         return None
     
     token: str = st.session_state.token
     
     try:
+        # Special handling when restoring notes after page refresh
+        is_restore = st.session_state.get("_restore_note_id") == note_id
+        
+        if DEBUG_MODE:
+            if is_restore:
+                logging.debug(f"Attempting to restore note with ID: {note_id}")
+            else:
+                logging.debug(f"Fetching note with ID: {note_id}")
+        
         response: Optional[Dict[str, Any]] = await api_request(
             "GET", 
             f"/notes/{note_id}", 
@@ -89,15 +99,25 @@ async def get_note(note_id: int) -> Optional[Dict[str, Any]]:
         if response:
             # Debug info
             if DEBUG_MODE:
-                logging.debug(f"Retrieved note: {response}")
+                if is_restore:
+                    logging.debug(f"Successfully restored note: {response.get('title', 'Untitled')}")
+                else:
+                    logging.debug(f"Retrieved note: {response}")
             return response
         else:
-            st.error("Failed to retrieve note")
+            # Use a more targeted approach for error messages
+            if not is_restore:
+                # Only show error to user if this is a direct request, not a restoration
+                st.error("Failed to retrieve note")
+            
             if DEBUG_MODE:
                 logging.error(f"Error retrieving note {note_id}: No data returned")
             return None
     except Exception as e:
-        st.error(f"Error retrieving note: {str(e)}")
+        # Again, only show errors directly if not restoring
+        if not st.session_state.get("_restore_note_id") == note_id:
+            st.error(f"Error retrieving note: {str(e)}")
+        
         if DEBUG_MODE:
             logging.exception(f"Error in get_note for note_id={note_id}")
         return None
@@ -227,37 +247,77 @@ async def delete_note(note_id: int) -> bool:
     token: str = st.session_state.token
     
     try:
-        response: Optional[Any] = await api_request(
+        # Make the DELETE request
+        response = await api_request(
             "DELETE", 
             f"/notes/{note_id}", 
             token=token
         )
         
-        if response is not None:
-            # Clear current note if it's the one being deleted
-            if "current_note" in st.session_state and st.session_state.current_note and st.session_state.current_note.get("id") == note_id:
-                st.session_state.current_note = None
-                
-            # Refresh notes list
-            await get_notes()
+        # For DELETE requests, a 204 response will return None
+        # which is a successful deletion (not an error)
+        # Clear current note if it's the one being deleted
+        if "current_note" in st.session_state and st.session_state.current_note and st.session_state.current_note.get("id") == note_id:
+            st.session_state.current_note = None
             
-            st.success("Note deleted successfully!")
+        # Refresh notes list
+        await get_notes()
+        
+        # Debug info
+        if DEBUG_MODE:
+            logging.debug(f"Deleted note ID: {note_id}")
             
-            # Debug info
-            if DEBUG_MODE:
-                logging.debug(f"Deleted note ID: {note_id}")
-                
-            return True
-        else:
-            st.error("Failed to delete note")
-            if DEBUG_MODE:
-                logging.error("Error deleting note: No data returned")
-            return False
+        # Always return success since HTTPStatusError would be caught if the deletion failed
+        return True
     except Exception as e:
         st.error(f"Error deleting note: {str(e)}")
         if DEBUG_MODE:
             logging.exception("Error in delete_note")
         return False
+
+
+async def get_translation_preview(note_id: int):
+    """Get a preview of the translated note content without saving to database.
+    
+    Args:
+        note_id: The ID of the note to translate
+    
+    Returns:
+        tuple: (success, translation) where translation is the translated text or error message
+    """
+    # Check if token is in session state
+    if "token" not in st.session_state:
+        logger.warning("Translation preview attempted without auth token")
+        return False, "Authentication required"
+    
+    token = st.session_state.token
+    
+    try:
+        logger.info(f"Requesting translation preview for note_id={note_id}")
+        
+        # Use preview query parameter in request
+        response = await api_request(
+            f"/notes/{note_id}/translate",
+            method="POST",
+            token=token,
+            params={"preview": "true"}
+        )
+        
+        if response and "translated_text" in response:
+            # Log a truncated version of the translation for debugging
+            preview_text = response["translated_text"][:50] + "..." if len(response["translated_text"]) > 50 else response["translated_text"]
+            logger.debug(f"Translation preview response received: {preview_text}")
+            return True, response["translated_text"]
+        elif response:
+            logger.error(f"Translation preview response missing translated_text: {response}")
+            return False, "Error: Invalid response format"
+        else:
+            logger.error("No response received for translation preview")
+            return False, "Error: No response from server"
+            
+    except Exception as e:
+        logger.exception(f"Error getting translation preview: {str(e)}")
+        return False, f"Error: {str(e)}"
 
 
 async def translate_note(note_id: int) -> bool:

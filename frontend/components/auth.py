@@ -101,8 +101,8 @@ def switch_to_login() -> None:
 
 def render_top_nav() -> None:
     """Render the top navigation bar for authenticated users."""
-    # Get current user info
-    user_info = st.session_state.get("user", {})
+    # Get current user info and ensure it's not None
+    user_info = st.session_state.get("user", {}) or {}
     username = user_info.get("username", "User")
     
     # Create a clean layout using Streamlit native components
@@ -142,7 +142,7 @@ def logout_user() -> None:
 
 def render_profile_view() -> None:
     """Render the user profile view."""
-    user_info = st.session_state.get("user", {})
+    user_info = st.session_state.get("user", {}) or {}
     username = user_info.get("username", "")
     email = user_info.get("email", "")
     

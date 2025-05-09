@@ -17,9 +17,17 @@ import streamlit as st
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("api_service")
 
+# Get secrets from Streamlit's secrets or environment variables
+def get_secret(key: str, default: Any = None) -> Any:
+    """Get a secret from Streamlit's secrets or environment variables."""
+    try:
+        return st.secrets[key]
+    except (KeyError, AttributeError):
+        return os.getenv(key, default)
+
 # API configuration
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
-DEBUG_MODE = os.getenv("DEBUG_MODE", "False").lower() == "true"
+API_BASE_URL = get_secret("api_base_url", os.getenv("API_BASE_URL", "http://localhost:8000/api/v1"))
+DEBUG_MODE = get_secret("debug", os.getenv("DEBUG_MODE", "False").lower() == "true")
 
 # TypeVar for generic API response
 T = TypeVar("T")
@@ -184,6 +192,9 @@ async def api_request(
                 token = f"Bearer {token}"
             headers["Authorization"] = token
 
+        # Special logging for authentication endpoints
+        is_auth_endpoint = path.startswith("/auth/")
+        
         if DEBUG_MODE:
             # Make a copy of headers to avoid modifying the original
             safe_headers: Dict[str, str] = headers.copy()
@@ -201,6 +212,12 @@ async def api_request(
             # Show complete request data for registration to help with debugging
             if path == "/auth/register":
                 logging.debug(f"Registration data: {json.dumps(data)}")
+            elif path == "/auth/login":
+                # For login, just log the username but not the password
+                if data and "username" in data:
+                    logging.debug(f"Login attempt for user: {data['username']}")
+            elif path == "/auth/me":
+                logging.debug("Fetching current user details")
             elif data:
                 # For other requests, limit data to first 100 chars
                 logging.debug(f"Data: {json.dumps(data)[:100]}...")
@@ -228,7 +245,25 @@ async def api_request(
 
         if DEBUG_MODE:
             logging.debug(f"Response status: {response.status_code}")
-            logging.debug(f"Response headers: {response.headers}")
+            
+            # Enhanced logging for auth endpoints
+            if is_auth_endpoint:
+                logging.debug(f"Auth endpoint response headers: {dict(response.headers)}")
+                
+                # For detailed debugging of authentication issues
+                if path == "/auth/me":
+                    if response.status_code == 200:
+                        user_info = response.json()
+                        logging.debug(f"Successfully retrieved user details: {user_info.get('username', 'unknown')}")
+                    else:
+                        logging.debug(f"Failed to get user details: {response.status_code}")
+                elif path == "/auth/login":
+                    if response.status_code == 200:
+                        logging.debug("Login successful")
+                    else:
+                        logging.debug(f"Login failed with status: {response.status_code}")
+            else:
+                logging.debug(f"Response headers: {response.headers}")
 
             # Log complete response for registration
             if path == "/auth/register":
@@ -248,19 +283,24 @@ async def api_request(
         return None
 
     except httpx.HTTPStatusError as e:
-        if DEBUG_MODE and "/auth/register" in path:
-            logging.error(
-                f"Registration error: {e.response.status_code} - {e.response.text}"
-            )
+        if DEBUG_MODE:
+            if is_auth_endpoint:
+                logging.error(
+                    f"Authentication error ({path}): {e.response.status_code} - {e.response.text}"
+                )
+            elif "/auth/register" in path:
+                logging.error(
+                    f"Registration error: {e.response.status_code} - {e.response.text}"
+                )
         handle_api_error(e)
         return None
     except httpx.TimeoutException:
         st.error("Request timed out. Please try again.")
         if DEBUG_MODE:
-            logging.error("API request timed out")
+            logging.error(f"API request timed out for {path}")
         return None
     except Exception as e:
         # st.error(f"An error occurred: {str(e)}")
         if DEBUG_MODE:
-            logging.exception(f"API request failed: {str(e)}")
+            logging.exception(f"API request failed for {path}: {str(e)}")
         return None

@@ -1,4 +1,4 @@
-name: Notes App CI
+name: CI/CD Pipeline
 
 on:
   push:
@@ -7,49 +7,136 @@ on:
     branches: [ main ]
 
 jobs:
-  build-and-test:
+  quality-checks:
     runs-on: ubuntu-latest
-    
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
-    
+        python-version: '3.9'
+        
     - name: Install Poetry
       run: |
         curl -sSL https://install.python-poetry.org | python3 -
-        export PATH="/root/.local/bin:$PATH"
-        poetry --version
-    
+        
     - name: Install dependencies
+      run: poetry install
+        
+    - name: Run Flake8
       run: |
-        poetry install
+        poetry run flake8 frontend backend --count --select=E9,F63,F7,F82 --show-source --statistics
+        poetry run flake8 frontend backend --count --exit-zero --max-complexity=10 --max-line-length=100 --statistics
+        
+    - name: Run Black
+      run: poetry run black --check frontend backend
+        
+    - name: Run isort
+      run: poetry run isort --check-only frontend backend
+        
+    - name: Run Bandit
+      run: poetry run bandit -r frontend backend -f json -o bandit-results.json
+      
+    - name: Run Radon
+      run: |
+        poetry run radon mi frontend backend -s
+        poetry run radon cc frontend backend -a -s
+        
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          
+    steps:
+    - uses: actions/checkout@v4
     
-    - name: Run tests with pytest
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+        
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        
+    - name: Install dependencies
+      run: poetry install
+        
+    - name: Run tests with coverage
       env:
-        RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
-        SECRET_KEY: ${{ secrets.SECRET_KEY }}
-        USE_MOCK_TRANSLATION: ${{ secrets.USE_MOCK_TRANSLATION || 'True' }}
-        TESTING: 'True'
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
       run: |
-        poetry run pytest backend/app/tests/ -v --cov=backend --cov-report=xml
-    
-    - name: Check code quality with flake8
-      run: |
-        poetry run flake8 backend frontend
-    
-    - name: Check security with bandit
-      run: |
-        poetry run bandit -r backend
-    
+        poetry run pytest --cov=frontend --cov=backend --cov-report=xml --cov-report=term-missing
+        
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v4
       with:
         file: ./coverage.xml
-        fail_ci_if_error: false
+        fail_ci_if_error: true
+        
+  performance:
+    runs-on: ubuntu-latest
+    needs: [quality-checks, test]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+        
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        
+    - name: Install dependencies
+      run: poetry install
+        
+    - name: Run Locust performance tests
+      run: |
+        poetry run locust -f locustfile.py --headless -u 20 -r 1 --run-time 1m --host http://localhost:8000
+        
+  security:
+    runs-on: ubuntu-latest
+    needs: [quality-checks, test, performance]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+        
+    - name: Install Poetry
+      run: |
+        curl -sSL https://install.python-poetry.org | python3 -
+        
+    - name: Install dependencies
+      run: poetry install
+        
+    - name: Run Bandit security checks
+      run: poetry run bandit -r frontend backend -f json -o bandit-results.json
+      
+    - name: Check Bandit results
+      run: |
+        if [ -s bandit-results.json ]; then
+          echo "Security issues found!"
+          cat bandit-results.json
+          exit 1
+        fi
 
   api-docs-and-security:
     runs-on: ubuntu-latest
